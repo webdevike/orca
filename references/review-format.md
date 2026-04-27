@@ -86,17 +86,17 @@ The **Actionable items** section is the orchestrator's primary handoff target. W
 
 ## Output contract from the reviewer
 
-A review-class playbook's worker writes to `.orca/reviews/<type>-<worker_id>-<ts>.md`, then echoes two lines on its own (in this order, on separate lines):
+A review-class playbook's worker writes to `.orca/reviews/<type>-<worker_id>-<ts>.md`, then echoes a single marker on its own line:
 
 ```
-REVIEW_REPORT_READY: .orca/reviews/<type>-<worker_id>-<ts>.md
 REVIEW_DONE
 ```
 
-- `REVIEW_REPORT_READY:` is caught by the playbook's `watch` rule with `action: escalate` — orca captures the pane tail to logs and adds a `questions_pending` entry pointing at the file.
-- `REVIEW_DONE` is caught by `stop_when` — orca closes the pane.
+Caught by the playbook's `watch` rule with `action: stop` — the orchestrator marks the worker `task_complete`, closes the pane, then runs the review-chain aggregation step (see `SKILL.md`). The aggregator reads the file from disk and triages by frontmatter `status`.
 
-Workers should write the file **before** echoing either marker. If the file write fails, the worker should echo `REVIEW_FAILED: <reason>` instead and orca's escalation captures the failure for the orchestrator.
+**Why one marker, not two**: an earlier draft used `REVIEW_REPORT_READY: <path>` (escalate) followed by `REVIEW_DONE` (stop). With both markers in the captured pane tail, ordered watch matching kept escalating on every tick because `escalate` doesn't advance pane state. One marker + `action: stop` is unambiguous.
+
+**Failure handling**: workers MUST always emit `REVIEW_DONE`, even on failure. Write a placeholder review with `status: fail` and the reason in `## Summary`, then emit the marker. A missing review file is ambiguous (worker crashed? still running? confused?) — a fail-status file is unambiguous.
 
 ## Aggregation (orchestrator side)
 

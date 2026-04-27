@@ -95,19 +95,13 @@ spawn:
 
            See `~/.claude/skills/orca/references/review-format.md` for the full convention if any field is unclear.
 
-        4. After the file is written, echo these two lines on their own, in order, with NO other text on those lines:
+        4. After the file is written, echo this single line on its own, with NO other text on that line:
 
            ```
-           REVIEW_REPORT_READY: .orca/reviews/code-{worker_id}-<ts>.md
            REVIEW_DONE
            ```
 
-           If you couldn't write the file (filesystem error, permissions, etc.), instead echo:
-
-           ```
-           REVIEW_FAILED: <one-line reason>
-           REVIEW_DONE
-           ```
+           If you couldn't write the file (filesystem error, permissions, etc.), still write a placeholder review with `status: fail` explaining the reason in `## Summary`, then echo `REVIEW_DONE`. The orchestrator reads frontmatter+body to triage; a missing file would be ambiguous, so always emit something.
 
         ## Hard rules
 
@@ -118,13 +112,8 @@ spawn:
         - If `{target}` is malformed or you can't figure out the diff, write a `status: fail` review explaining what you tried and exit via REVIEW_DONE anyway. Do not stall.
 
 watch:
-  - pattern: "^REVIEW_REPORT_READY: "
-    action: escalate
-  - pattern: "^REVIEW_FAILED: "
-    action: escalate
-
-stop_when:
-  - "^REVIEW_DONE$"
+  - pattern: "^REVIEW_DONE$"
+    action: stop
 ---
 
 # Notes

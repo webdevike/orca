@@ -113,19 +113,13 @@ spawn:
 
            See `~/.claude/skills/orca/references/review-format.md` for the canonical convention.
 
-        6. After the file is written, echo these two lines on their own, in order, with NO other text on those lines:
+        6. After the file is written, echo this single line on its own, with NO other text on that line:
 
            ```
-           REVIEW_REPORT_READY: .orca/reviews/ui-{worker_id}-<ts>.md
            REVIEW_DONE
            ```
 
-           If you couldn't reach the app or couldn't write the file, echo instead:
-
-           ```
-           REVIEW_FAILED: <one-line reason>
-           REVIEW_DONE
-           ```
+           If the app is unreachable or the write failed, still write a placeholder review with `status: fail` explaining the reason, then echo `REVIEW_DONE`. The orchestrator reads frontmatter+body to triage; a missing file would be ambiguous, so always emit something.
 
         ## Hard rules
 
@@ -137,13 +131,8 @@ spawn:
         - If `{app_url}` is unreachable, write a `status: fail` review with that as the only issue and exit via REVIEW_DONE.
 
 watch:
-  - pattern: "^REVIEW_REPORT_READY: "
-    action: escalate
-  - pattern: "^REVIEW_FAILED: "
-    action: escalate
-
-stop_when:
-  - "^REVIEW_DONE$"
+  - pattern: "^REVIEW_DONE$"
+    action: stop
 ---
 
 # Notes

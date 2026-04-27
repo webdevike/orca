@@ -173,18 +173,29 @@ For each worker the playbook implies (usually one — but cross-repo playbooks m
 
    The launcher must be the auto-perms variant (`cdp`, `codex --dangerously-bypass-approvals-and-sandbox`, `pi`, etc.). Submit with `cmux send-key … enter` or `tmux send-keys … Enter`.
 7. Sleep ~8s (Claude Code / codex boot time).
-8. **Handle first-run trust prompt** (Claude Code only, when launching `cdp` in a directory the user has never trusted in this profile). Capture the pane: if it shows `Is this a project you trust?` or `Yes, I trust this folder`, send a single Enter to accept, then sleep 2s. If the prompt isn't there, do nothing — the directory is already trusted. codex and pi have no equivalent prompt; skip this step for them.
+8. **Handle first-run trust prompt**. Both Claude Code and codex show a trust dialog the first time an agent boots in an unfamiliar directory. Capture the pane and send a single Enter (which selects the highlighted "trust / continue" option) if you see any of:
+   - Claude Code: `Is this a project you trust?` / `Yes, I trust this folder`
+   - codex: `Do you trust the contents of this directory?` / `Yes, continue`
+   - pi: no equivalent prompt — skip
+
+   After sending Enter, sleep 2s. If no prompt was shown, the directory is already trusted and Enter on an empty input line is harmless.
 9. Send `/clear` and Enter (skip if launcher is pi — pi has no slash command for that). Sleep 2s.
 10. Send the playbook's `spawn.agents.<agent>.initial` (with param substitution applied) + Enter.
-11. Append the worker to `state.json` with `last_signal: spawning`. Persist `playbook` (the playbook's `name` field) and `category` (the playbook's `category` field, default `implementation` if unset) — both are read by Step 6 when deciding whether to offer the review chain.
+11. Append the worker to `state.json` with `last_signal: spawning`. Persist:
+    - `playbook` — the playbook's `name` field
+    - `category` — the playbook's `category` field (default `implementation` if unset)
+    - `cwd` — the resolved `spawn.cwd` after parameter substitution (canonical worktree identifier; used by Step 6 review-chain matching regardless of which param name the playbook used: `repo`, `worktree`, `target`, etc.)
+
+    Step 6 reads all three when deciding whether to offer the review chain and how to glob review files.
 
 ### Step 5. Poll + advance (every active tick)
 
 For each worker in `state.json` whose `last_signal` is not `task_complete` or `dead`:
 
 1. Capture pane (last `LINES` lines, default 30): `cmux read-screen --surface <ref> --lines 30` or `tmux capture-pane -t <ref> -p -S -30`. If capture fails twice in a row, mark `dead` and skip.
-2. Match each `watch[].pattern` against the captured text **in order**. First match wins.
-3. On first match, perform the corresponding `action`:
+2. **Check `stop_when[]` first** (priority over `watch[]`). For each regex in the playbook's `stop_when` list: if it matches the captured text, mark the worker `last_signal: task_complete` and skip to step 5 (no further pattern matching this tick — terminal conditions trump in-flight actions). If `stop_when` is absent or no patterns match, continue.
+3. Match each `watch[].pattern` against the captured text **in order**. First match wins.
+4. On first match, perform the corresponding `action`:
 
    | Action | Implementation |
    |--------|---------------|
@@ -198,9 +209,9 @@ For each worker in `state.json` whose `last_signal` is not `task_complete` or `d
 
    Full action enum and `next` template syntax: [references/playbook-format.md](./references/playbook-format.md#action-vocabulary).
 
-4. If no `watch` pattern matched, run `scripts/detect-state.sh --stdin` against the captured text for a generic signal (`executing` / `idle` / `error` / etc.). Log but don't act on generic signals — the playbook's rules are authoritative.
-5. Append a `history` entry to the worker (`{ts, signal, action}`).
-6. Update `state.json` atomically (`.tmp` + `mv`).
+5. If no `watch` pattern matched, run `scripts/detect-state.sh --stdin` against the captured text for a generic signal (`executing` / `idle` / `error` / etc.). Log but don't act on generic signals — the playbook's rules are authoritative.
+6. Append a `history` entry to the worker (`{ts, signal, action}`).
+7. Update `state.json` atomically (`.tmp` + `mv`).
 
 After processing all workers:
 - If any worker had `task_complete` action → proceed to Step 6 for those.
@@ -220,17 +231,18 @@ For each worker to close:
    - **tmux**: `tmux kill-window -t <worker_id>`.
 3. Remove the worker entry from `state.json.workers` (or mark `last_signal: dead` if recovery is plausible — playbook-specific).
 4. **Offer review chain** (only when `last_signal: task_complete` AND closed worker's `category == "implementation"`):
-   - Check whether any review-class workers (`category: review`) for the same `worktree` are already in `state.json.workers[]` or have written to `.orca/reviews/` since this worker's `spawned_at`. If yes, skip — review chain is already in flight or done.
+   - Use the closed worker's `cwd` (persisted at spawn — see Step 4b#11) as the canonical worktree identifier. This works regardless of which param name the playbook used (`repo`, `worktree`, `target`, …).
+   - Check whether any review-class workers (`category: review`) with the same `cwd` are already in `state.json.workers[]` or have written to `.orca/reviews/` since this worker's `spawned_at`. If yes, skip — review chain is already in flight or done.
    - Otherwise, surface the offer to the user with concrete invocations, e.g.:
 
-     > "{playbook} closed cleanly. Want me to spawn validators against {worktree}?"
-     > `/orca code-review worktree={worktree} target=<PR# or commit-range>`
-     > `/orca ui-validator worktree={worktree} app_url=<url>`
+     > "{playbook} closed cleanly. Want me to spawn validators against {cwd}?"
+     > `/orca code-review worktree={cwd} target=<PR# or commit-range>`
+     > `/orca ui-validator worktree={cwd} app_url=<url>`
 
    - Wait for confirmation before spawning. See `## Review chain` section below for the full pattern (parallel spawn, frontmatter aggregation, actionable-items handoff).
 5. **Aggregate review chain** (only when `last_signal: task_complete` AND closed worker's `category == "review"`):
-   - Look for sibling review-class workers in `state.json.workers[]`. If any are still active, defer aggregation — wait for them to close too.
-   - When all review-class workers for the same `worktree` have closed, run the aggregation procedure from `## Review chain` (glob `.orca/reviews/*.md`, parse frontmatter, summarize, surface actionable items).
+   - Look for sibling review-class workers in `state.json.workers[]` with the same `cwd`. If any are still active, defer aggregation — wait for them to close too.
+   - When all review-class workers for the same `cwd` have closed, run the aggregation procedure from `## Review chain` (glob `.orca/reviews/*.md`, parse frontmatter, summarize, surface actionable items).
 6. If `state.json.workers` is empty and `/orca kill` was invoked, optionally archive `state.json` to `.orca/state.<ts>.json.bak` and start fresh on next invocation.
 
 ## Polling cadence
@@ -280,10 +292,13 @@ Both end up in `state.json.workers[]` as separate entries. They run side-by-side
 
 When a review-class worker closes (`task_complete` from matching `^REVIEW_DONE$`), don't just remove it from state and move on. Aggregate.
 
-1. Find all review files written since the earliest validator's `spawned_at`:
+1. Find all review files written since the earliest validator's `spawned_at`. Use the timestamp directly (no marker file needed):
    ```bash
-   find .orca/reviews -type f -name "*.md" -newer "$earliest_spawn_marker"
+   # Pick earliest_spawned_at across review-class workers for the same cwd from state.json
+   earliest_spawned_at=$(jq -r '.workers[] | select(.category=="review" and .cwd=="'"$CWD"'") | .spawned_at' .orca/state.json | sort | head -1)
+   find .orca/reviews -type f -name "*.md" -newermt "$earliest_spawned_at"
    ```
+   `-newermt` accepts ISO8601 strings directly (BSD `find` on macOS, GNU `find` on Linux both support it). No need to create a marker file at spawn time.
 2. For each file, read **frontmatter only** (skip the body for triage):
    ```bash
    awk '/^---$/{c++; next} c==1{print} c==2{exit}' <file>
