@@ -193,7 +193,7 @@ For each worker the playbook implies (usually one — but cross-repo playbooks m
 For each worker in `state.json` whose `last_signal` is not `task_complete` or `dead`:
 
 1. Capture pane (last `LINES` lines, default 30): `cmux read-screen --surface <ref> --lines 30` or `tmux capture-pane -t <ref> -p -S -30`. If capture fails twice in a row, mark `dead` and skip.
-2. **Check `stop_when[]` first** (priority over `watch[]`). For each regex in the playbook's `stop_when` list: if it matches the captured text, mark the worker `last_signal: task_complete` and skip to step 5 (no further pattern matching this tick — terminal conditions trump in-flight actions). If `stop_when` is absent or no patterns match, continue.
+2. **Check `stop_when[]` first** (priority over `watch[]`). For each regex in the playbook's `stop_when` list: if it matches the captured text, mark the worker `last_signal: task_complete` and skip directly to step 6 (history append) — do NOT run watch[] matching or generic detection (terminal conditions trump in-flight actions). If `stop_when` is absent or no patterns match, continue.
 3. Match each `watch[].pattern` against the captured text **in order**. First match wins.
 4. On first match, perform the corresponding `action`:
 
@@ -241,8 +241,9 @@ For each worker to close:
 
    - Wait for confirmation before spawning. See `## Review chain` section below for the full pattern (parallel spawn, frontmatter aggregation, actionable-items handoff).
 5. **Aggregate review chain** (only when `last_signal: task_complete` AND closed worker's `category == "review"`):
+   - **Capture the closing worker's `spawned_at` BEFORE substep 3 above removes the entry** — the aggregation step needs it. Stash it in a local variable (e.g. `closing_spawned_at=$(jq -r ".workers[] | select(.id==\"$WORKER_ID\") | .spawned_at" .orca/state.json)`) at the top of Step 6 for any review-class worker. Without this, aggregation runs against a state.json that has zero matching workers.
    - Look for sibling review-class workers in `state.json.workers[]` with the same `cwd`. If any are still active, defer aggregation — wait for them to close too.
-   - When all review-class workers for the same `cwd` have closed, run the aggregation procedure from `## Review chain` (glob `.orca/reviews/*.md`, parse frontmatter, summarize, surface actionable items).
+   - When all review-class workers for the same `cwd` have closed, run the aggregation procedure from `## Review chain` using the **earliest of `closing_spawned_at` plus any siblings' `spawned_at`** (passing it explicitly, since live state may no longer contain the closed workers).
 6. If `state.json.workers` is empty and `/orca kill` was invoked, optionally archive `state.json` to `.orca/state.<ts>.json.bak` and start fresh on next invocation.
 
 ## Polling cadence
@@ -292,13 +293,30 @@ Both end up in `state.json.workers[]` as separate entries. They run side-by-side
 
 When a review-class worker closes (`task_complete` from matching `^REVIEW_DONE$`), don't just remove it from state and move on. Aggregate.
 
-1. Find all review files written since the earliest validator's `spawned_at`. Use the timestamp directly (no marker file needed):
+1. Find all review files written since the earliest validator's `spawned_at`. The timestamp must be captured BEFORE the closing worker is removed from state (see Step 6 substep 5) — once removed, jq filters return empty. Use a marker file rather than `find -newermt`: BSD `find` rejects ISO8601 with `Z` ("Can't parse date/time"), and BSD vs GNU disagree on whether `T`-without-`Z` is UTC or local. A marker file's mtime sidesteps both gotchas.
+
    ```bash
-   # Pick earliest_spawned_at across review-class workers for the same cwd from state.json
-   earliest_spawned_at=$(jq -r '.workers[] | select(.category=="review" and .cwd=="'"$CWD"'") | .spawned_at' .orca/state.json | sort | head -1)
-   find .orca/reviews -type f -name "*.md" -newermt "$earliest_spawned_at"
+   # $closing_spawned_at was stashed at the top of Step 6 before the worker was removed.
+   # Fold in any sibling review workers (same cwd) still in live state:
+   sibling_min=$(jq -r --arg cwd "$CWD" '.workers[] | select(.category=="review" and .cwd==$cwd) | .spawned_at' .orca/state.json | sort | head -1)
+   earliest_spawned_at=$(printf '%s\n%s\n' "$closing_spawned_at" "$sibling_min" | grep -v '^$' | sort | head -1)
+
+   # Convert ISO8601 UTC → epoch seconds (portable across BSD/GNU date)
+   if epoch=$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$earliest_spawned_at" +%s 2>/dev/null); then : ;  # macOS BSD date
+   else epoch=$(date -u -d "$earliest_spawned_at" +%s); fi                                            # GNU date
+
+   # Create a marker file with that mtime, glob via -newer (POSIX, no parsing needed)
+   marker=$(mktemp)
+   if [[ "$(uname)" == "Darwin" ]]; then
+     touch -t "$(date -r "$epoch" +%Y%m%d%H%M.%S)" "$marker"     # BSD touch
+   else
+     touch -d "@$epoch" "$marker"                                # GNU touch
+   fi
+   find .orca/reviews -type f -name "*.md" -newer "$marker"
+   rm "$marker"
    ```
-   `-newermt` accepts ISO8601 strings directly (BSD `find` on macOS, GNU `find` on Linux both support it). No need to create a marker file at spawn time.
+
+   Yes, it's verbose. The simpler `find -newermt "$earliest_spawned_at"` form does NOT work on macOS for ISO8601-with-Z values, and silently disagrees on timezone interpretation across BSD/GNU when stripped. The marker file is the boring portable answer.
 2. For each file, read **frontmatter only** (skip the body for triage):
    ```bash
    awk '/^---$/{c++; next} c==1{print} c==2{exit}' <file>

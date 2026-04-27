@@ -140,8 +140,11 @@ Don't read the body of the review file from the orchestrator's chat output — c
 
 ## Failure modes
 
+The contract is single-marker: write the review file, emit `REVIEW_DONE`. Failure signal is `status: fail` in the file's frontmatter, NOT a separate marker. The orchestrator inspects the file after the worker closes.
+
 | Symptom | Likely cause | Recovery |
 |---------|--------------|----------|
-| Worker hangs after `REVIEW_REPORT_READY` without `REVIEW_DONE` | Codex got chatty post-write | `/orca stop <worker_id>` — file is still on disk, safe to close |
-| `REVIEW_FAILED` with "could not parse target" | Ambiguous `{target}` | Re-invoke with a more specific target (PR#, sha range) |
+| Worker closes but no review file in `.orca/reviews/` | Codex emitted `REVIEW_DONE` without writing first (contract violation) | Treat as `status: fail`. Check the captured pane log in `.orca/logs/<worker_id>-<ts>.txt` for what went wrong. Re-invoke if recoverable. |
+| Review file has `status: fail` with "could not parse target" | Ambiguous `{target}` | Re-invoke with a more specific target (PR#, sha range) |
+| Worker hangs without emitting `REVIEW_DONE` | Codex got stuck (long-running diff, network call) | Check the pane; if file is already on disk you can `/orca stop <worker_id>` to force close. Otherwise wait or re-invoke. |
 | File written but `status: pass` and `issue_count: 0` despite obvious issues | Codex missed the diff entirely | Check the worker's pane log — likely `gh pr diff` returned empty. Re-invoke with explicit commit range. |

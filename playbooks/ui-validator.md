@@ -159,10 +159,12 @@ Screenshots go to `.orca/reviews/screenshots/{worker_id}/<n>.png` — sibling di
 
 ## Failure modes
 
+The contract is single-marker: write the review file, emit `REVIEW_DONE`. Failure signal is `status: fail` in the file's frontmatter, NOT a separate marker. The orchestrator inspects the file after the worker closes.
+
 | Symptom | Likely cause | Recovery |
 |---------|--------------|----------|
-| `REVIEW_FAILED: cannot reach app_url` | App isn't running, wrong port, firewall | Confirm `curl <app_url>` works from terminal. Re-invoke. |
-| Worker hangs in browser without writing review | Computer use stuck on a modal or login screen | Check pane logs; provide an `acceptance_criteria` that includes test credentials if behind auth |
+| Review file has `status: fail` with "cannot reach app_url" | App isn't running, wrong port, firewall | Confirm `curl <app_url>` works from terminal. Re-invoke. |
+| Worker hangs in browser without emitting `REVIEW_DONE` | Computer use stuck on a modal or login screen | Check pane logs; provide an `acceptance_criteria` that includes test credentials if behind auth |
 | Issues reported but no screenshots | Codex skipped the screenshot step | Re-read the brief — screenshots are required for failures. Worth treating as a `needs-attention` followup on the playbook itself. |
 | `status: pass` despite obvious bugs | Validator covered too narrow a slice | Pass a more specific `target` or `acceptance_criteria` next run |
 
