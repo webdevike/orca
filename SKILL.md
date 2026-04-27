@@ -45,7 +45,7 @@ A playbook is a YAML-frontmatter markdown file telling orca how to drive a parti
 2. `~/.orca/playbooks/*.md` — user global
 3. `~/.claude/skills/orca/playbooks/*.md` — bundled defaults
 
-**Frontmatter shape** (full spec in [references/playbook-format.md](./references/playbook-format.md), TBD — see [`playbooks/gsd.md`](./playbooks/gsd.md) for a worked example):
+**Frontmatter shape** (full spec in [references/playbook-format.md](./references/playbook-format.md); worked example in [`playbooks/gsd.md`](./playbooks/gsd.md)):
 
 ```yaml
 ---
@@ -109,58 +109,117 @@ All worker launchers default to their **dangerous/auto-approval** flag. Orca can
 
 A playbook may set `launcher_mode: safe` to opt out, but this is rare — the user has already accepted the safety tradeoff for orchestration ergonomics.
 
-## Workflow
+## Procedure
 
-### 1. Plan or load
+Follow these steps in order on every `/orca` invocation. Numbered steps are prescriptive — do them, in this order, every time.
 
-- New work, no playbook match → **planning mode**: ask the user what to orchestrate, optionally write a PRD to `.orca/prd-{name}.md` so future ticks can reference it (and so workers can read it).
-- Recognized playbook (matched via `triggers` or explicit `/orca <name>`) → **apply mode**: gather any missing `params`, jump to spawn.
-
-### 2. Spawn workers
-
-Use the backend's pane-creation primitive:
-
-- **cmux**: `cmux new-split <direction>` returns `OK surface:N workspace:M` on stdout — capture `surface:N`. No `--window` flag needed (same window as orchestrator).
-- **tmux**: `tmux new-window -d -n "<label>" -c "<cwd>"` then `tmux send-keys` to it.
-
-Then send the playbook's `launcher` and (after a short wait) the `initial` command. Always `/clear` before sending agentic commands to prevent context drift.
-
-Per-worker tracking goes in `.orca/state.json` — see [references/state-schema.md](./references/state-schema.md).
-
-### 3. Poll & detect signal
+### Step 1. Detect or read backend
 
 ```bash
-# cmux
-cmux read-screen --surface surface:N --lines 50
-
-# tmux
-tmux capture-pane -t "<label>" -p -S -50
+if [[ -f .orca/state.json ]]; then
+  BACKEND=$(jq -r '.backend' .orca/state.json)
+else
+  if cmux current-window >/dev/null 2>&1; then BACKEND=cmux
+  elif [[ -n "${TMUX:-}" ]]; then BACKEND=tmux
+  else echo "🐋 needs cmux or tmux. Launch one and re-run."; exit 1
+  fi
+fi
 ```
 
-Match output against the playbook's `watch` patterns. Signals from the bundled set:
+Persist `BACKEND` to `state.json` on first run. Never re-detect once persisted.
 
-- `executing` → keep waiting
-- `waiting_input` (matches an `action: send_enter` or similar pattern) → respond per the rule
-- `phase_complete` / `task_complete` → run `action: advance` or close
-- `error` → escalate
-- `idle` (no progress in N seconds) → check if upstream stalled
+### Step 2. Load or initialize state
 
-Polling cadence: **60–120s** in active mode, **1200–1800s** in idle/waiting-on-human mode. Use `ScheduleWakeup` (in `/loop` mode) for long idle waits to amortize the prompt-cache miss.
+If `.orca/state.json` exists, parse it and reconcile:
+- For each `worker`, capture the pane (`cmux read-screen --surface <ref> --lines 30` or `tmux capture-pane -t <ref> -p -S -30`).
+- If capture fails, mark `last_signal: dead`. GC dead workers on next tick.
 
-### 4. Advance / answer / escalate
+If absent, create `.orca/` directory and write a fresh `state.json` skeleton (workers: [], questions_pending: [], backend, started_at, cwd) — see [references/state-schema.md](./references/state-schema.md).
 
-- Auto-actions defined by playbook (`send_enter`, `send_text`, `advance`, etc.) — execute directly.
-- Question patterns (e.g., GSD `discuss-phase`) — check the PRD first; if covered, answer; otherwise escalate to the user.
-- Escalation: capture last 50–100 lines to `.orca/logs/<pane>-<ts>.txt`, post a clear message ("worker X stuck on Y, here's what I see, what should I do?"), wait.
+### Step 3. Route by user input
 
-### 5. Close
+| User input | Route |
+|------------|-------|
+| `/orca` (no args) | Step 4a: planning mode |
+| `/orca <name> key=value …` | Step 4b: apply playbook directly |
+| `/orca status` | Step 5: report and exit |
+| `/orca stop <worker_id>` | Step 6 (close one), then exit |
+| `/orca kill` | Step 6 (close all), then exit |
+| `/orca` arrives via `/loop` rewake | Step 5: poll + advance, then re-schedule |
 
-When a playbook's `stop_when` matches OR the user says `stop <pane>` / `kill`:
+### Step 4a. Planning mode
 
-- `cmux`: `cmux close-surface --surface surface:N`
-- `tmux`: `tmux kill-window -t "<label>"`
+1. List available playbooks (scan `./.orca/playbooks/`, then `~/.orca/playbooks/`, then bundled `playbooks/`).
+2. Ask the user what to orchestrate. Match their answer against playbook `triggers` if possible. Otherwise treat as freeform — offer to write a PRD to `.orca/prd-<slug>.md` and proceed without a playbook (manual `watch` rules from the user, captured into a one-off in-memory playbook).
+3. Once a playbook is selected, gather any missing required `params` (prompt for each).
+4. Confirm the plan back to the user (one line: "spawning {playbook} for {params} as {agent} worker"). Wait for ack before spawning.
+5. Proceed to Step 4b.
 
-Update `.orca/state.json` accordingly.
+### Step 4b. Apply playbook (spawn worker)
+
+For each worker the playbook implies (usually one — but cross-repo playbooks may declare more):
+
+1. Resolve params (user input + playbook defaults). If any required param is missing, error and exit.
+2. Pick agent: explicit `agent=` arg → playbook's `default_agent` → first `supported_agents` entry. Verify the agent block exists in `spawn.agents.<name>`.
+3. Generate a `worker_id` (`{playbook}-{cwd-slug}-{disambiguator}`).
+4. Spawn the pane:
+   - **cmux**: `cmux new-split <direction>` (default `right`); capture `surface:N` and `workspace:M` from stdout (`OK surface:N workspace:M`).
+   - **tmux**: `tmux new-window -d -n "<worker_id>" -c "<spawn.cwd>"`.
+5. Sleep `spawn.agents.<agent>.initial_wait_s || 5` seconds.
+6. Send the launcher (`spawn.agents.<agent>.launcher` — must be the auto-perms variant). `cmux send-key … enter` or `tmux send-keys … Enter` to submit.
+7. Sleep ~8s (Claude Code / codex boot time).
+8. Send `/clear` and Enter (skip if launcher is pi — pi has no slash command for that). Sleep 2s.
+9. Send the playbook's `spawn.agents.<agent>.initial` (with param substitution applied) + Enter.
+10. Append the worker to `state.json` with `last_signal: spawning`.
+
+### Step 5. Poll + advance (every active tick)
+
+For each worker in `state.json` whose `last_signal` is not `task_complete` or `dead`:
+
+1. Capture pane (last `LINES` lines, default 30): `cmux read-screen --surface <ref> --lines 30` or `tmux capture-pane -t <ref> -p -S -30`. If capture fails twice in a row, mark `dead` and skip.
+2. Match each `watch[].pattern` against the captured text **in order**. First match wins.
+3. On first match, perform the corresponding `action`:
+
+   | Action | Implementation |
+   |--------|---------------|
+   | `advance` | Send `/clear`, sleep 2s, send substituted `next` + Enter. Set `last_signal: phase_complete`. |
+   | `send_enter` | Send Enter only. `last_signal: waiting_input`. |
+   | `send_text` | Send substituted `next` + Enter. |
+   | `clear_and_send` | Send `/clear`, sleep 2s, send `next` + Enter. |
+   | `stop` | Mark `last_signal: task_complete`. Pane will be closed in Step 6. |
+   | `escalate` | Capture last 100 lines to `.orca/logs/<worker_id>-<ts>.txt`, add to `questions_pending`, ping user, no further action this tick. |
+   | `wait` | No-op. Update `last_signal` only. |
+
+   Full action enum and `next` template syntax: [references/playbook-format.md](./references/playbook-format.md#action-vocabulary).
+
+4. If no `watch` pattern matched, run `scripts/detect-state.sh --stdin` against the captured text for a generic signal (`executing` / `idle` / `error` / etc.). Log but don't act on generic signals — the playbook's rules are authoritative.
+5. Append a `history` entry to the worker (`{ts, signal, action}`).
+6. Update `state.json` atomically (`.tmp` + `mv`).
+
+After processing all workers:
+- If any worker had `task_complete` action → proceed to Step 6 for those.
+- If all workers are `task_complete` or `dead` → print summary, exit.
+- If user invoked `/orca status` → print one line per worker (id, signal, last-poll age) and exit.
+- Otherwise → schedule next tick:
+  - In `/loop` mode: `ScheduleWakeup` with delay = playbook's `poll_interval_s` (default 90s active, 1200–1800s if every worker is `idle`).
+  - Outside `/loop`: print "next poll in {N}s" and exit. User re-invokes manually or via cron.
+
+### Step 6. Close worker(s)
+
+For each worker to close:
+
+1. Capture last 100 lines to `.orca/logs/<worker_id>-<ts>.txt` (preserve evidence).
+2. Close the pane:
+   - **cmux**: `cmux close-surface --surface <ref>` (add `--window <window>` if the worker is in a separate workspace).
+   - **tmux**: `tmux kill-window -t <worker_id>`.
+3. Remove the worker entry from `state.json.workers` (or mark `last_signal: dead` if recovery is plausible — playbook-specific).
+4. If `state.json.workers` is empty and `/orca kill` was invoked, optionally archive `state.json` to `.orca/state.<ts>.json.bak` and start fresh on next invocation.
+
+## Polling cadence
+
+- Active mode (any worker not `task_complete`/`dead`): **60–120s** between ticks. Default `poll_interval_s: 90`.
+- Idle mode (every worker `idle` for ≥ `idle_threshold_s`): **1200–1800s**. The 5-min cache window matters here — never pick 300–600s, that's worst-of-both.
+- Use `ScheduleWakeup` from `/loop` dynamic mode for self-pacing across context boundaries.
 
 ## State Files
 
@@ -189,7 +248,17 @@ These call the backend-appropriate primitive based on `.orca/state.json`'s `back
 |------|-----|
 | [references/backends.md](./references/backends.md) | cmux + tmux primitive table, gotchas, side-by-side commands |
 | [references/state-schema.md](./references/state-schema.md) | `.orca/state.json` shape, PRD template, log format |
-| [references/playbook-format.md](./references/playbook-format.md) | Full YAML schema, available actions, parameterization syntax |
+| [references/playbook-format.md](./references/playbook-format.md) | Full YAML schema, action vocabulary, parameter substitution |
+
+## Helper scripts
+
+```bash
+~/.claude/skills/orca/scripts/poll.sh                # capture + classify every tracked worker
+~/.claude/skills/orca/scripts/detect-state.sh REF    # classify one pane via backend
+~/.claude/skills/orca/scripts/detect-state.sh --stdin < pane-text  # classify without re-capturing
+```
+
+These dispatch by reading `backend` from `.orca/state.json`. Useful for one-off diagnostics outside the main loop.
 
 ## Anti-Patterns
 

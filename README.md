@@ -37,14 +37,45 @@ A playbook is a markdown file with YAML frontmatter that tells orca how to drive
 - [`gsd.md`](./playbooks/gsd.md) — GSD multi-repo phase orchestration with auto-advance on `PHASE N COMPLETE ✓`
 - _More to come: codex, claude-cdp, dev-server_
 
-Format spec: see [`references/playbook-format.md`](./references/playbook-format.md) (TBD — for now, copy `gsd.md` and adapt).
+Format spec: [`references/playbook-format.md`](./references/playbook-format.md) — full schema, action vocabulary, parameter substitution.
 
 Lookup precedence:
 1. `./.orca/playbooks/*.md` (project-specific)
 2. `~/.orca/playbooks/*.md` (global)
-3. `~/.claude/skills/orca/playbooks/*.md` (bundled)
+3. `<orca-checkout>/playbooks/*.md` (bundled)
 
 Project wins on name conflict.
+
+## Example flow
+
+```text
+$ /orca gsd repo=/Users/ike/Code/Good/GoodWord-App phase=3
+🐋 backend: cmux (detected via cmux current-window)
+🐋 playbook: gsd  agent: claude-code  worker_id: gsd-goodword-3
+🐋 spawning surface:44 in workspace:10 → cd /Users/ike/Code/Good/GoodWord-App && cdp
+🐋 (waited 8s for cdp boot)
+🐋 sent: /clear
+🐋 sent: /clear && /gsd:plan-phase 3
+🐋 next poll in 90s.
+
+$ # …90s later (or on /loop tick)
+$ /orca
+🐋 polling 1 worker
+🐋 gsd-goodword-3: executing (planner running, 47s)
+🐋 next poll in 90s.
+
+$ # …several ticks later
+🐋 gsd-goodword-3: phase_complete (matched "PHASE 3 COMPLETE ✓")
+🐋 advancing → /clear && /gsd:execute-phase 3
+🐋 next poll in 90s.
+
+$ # …
+🐋 gsd-goodword-3: task_complete (matched "MILESTONE COMPLETE")
+🐋 closing surface:44, captured tail to .orca/logs/gsd-goodword-3-2026-04-27T11:42:00Z.txt
+🐋 all workers done. /orca kill to remove state.
+```
+
+`/orca status` prints one line per active worker. `/orca stop <id>` closes one pane. `/orca kill` closes everything and clears state.
 
 ## Constraints
 
