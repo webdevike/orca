@@ -14,11 +14,17 @@ params:
   - name: phase
     required: true
     description: Phase number (e.g., 5) or "next" to read STATE.md and pick
+supported_agents: [claude-code]   # GSD slash commands are Claude-Code-specific
+default_agent: claude-code
 spawn:
   cwd: "{repo}"
-  launcher: cdp
-  initial_wait_s: 8
-  initial: "/clear && /gsd:plan-phase {phase}"
+  agents:
+    claude-code:
+      launcher: cdp
+      initial_wait_s: 8
+      initial: "/clear && /gsd:plan-phase {phase}"
+    # codex / pi can be added if/when GSD ships equivalents for those agents.
+    # As of now, /gsd:* commands are Claude Code skills only.
 watch:
   - pattern: "PHASE \\d+ COMPLETE ✓"
     action: advance

@@ -57,10 +57,20 @@ params:
     required: true
   - name: phase
     required: true
+supported_agents: [claude-code]            # which agents can run this playbook as workers
+default_agent: claude-code
 spawn:
   cwd: "{repo}"
-  launcher: cdp                     # MUST be auto-perms variant; see "Auto-perms" below
-  initial: "/clear && /gsd:plan-phase {phase}"
+  agents:
+    claude-code:
+      launcher: cdp                        # auto-perms variant per agent; see "Auto-perms" below
+      initial: "/clear && /gsd:plan-phase {phase}"
+    codex:
+      launcher: codex --dangerously-bypass-approvals-and-sandbox
+      initial: "Read .planning/STATE.md and execute phase {phase}'s plan…"
+    pi:
+      launcher: pi                         # pi has no permission prompts by default
+      initial: "Read .planning/STATE.md and execute phase {phase}…"
 watch:
   - pattern: "PHASE N COMPLETE ✓"
     action: advance
@@ -71,7 +81,21 @@ stop_when:
 ---
 ```
 
+A playbook describes the **work** in an agent-agnostic way. Each entry under `spawn.agents` is the launcher + initial-prompt mapping for one agent runtime. `supported_agents` declares which are actually viable (e.g., GSD is Claude-Code-only because the `/gsd:*` commands are Claude Code skills). The orchestrator picks an agent per worker — defaulting to `default_agent`, overridable per-spawn.
+
 The markdown body holds free-form notes orca reads as natural-language guidance (quirks, escalation hints, manual recovery steps).
+
+## Agents as orchestrator OR worker
+
+Coding agents (Claude Code, codex, pi) are interchangeable runtimes. Any of them can run **as orchestrator** (executing this skill / its peer configs) or **as worker** (spawned by an orchestrator, executing a playbook). The orca repo therefore ships multiple orchestrator configs so each agent has a way to play that role:
+
+| Agent | Orchestrator config | Lives at |
+|-------|--------------------|----------|
+| Claude Code | `SKILL.md` (this file) | `~/.claude/skills/orca/SKILL.md` |
+| codex | `AGENTS.md` (codex's project-config convention) | repo root, codex picks it up automatically when launched in the dir |
+| pi | TBD — pi has TS Extensions / Skills / Prompt Templates; orca-as-pi-skill is a future addition | `pi/` directory in repo (placeholder) |
+
+A worker pane only ever runs an agent in single-agent mode — the orchestration skill is irrelevant there. Workers consume the **playbook**, not orca itself.
 
 ## Auto-permission Mode
 
