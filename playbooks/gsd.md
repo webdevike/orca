@@ -1,6 +1,7 @@
 ---
 name: gsd
 description: GSD multi-repo phase orchestration with auto-advance on phase completion
+category: implementation
 triggers:
   - "gsd"
   - "run phase"

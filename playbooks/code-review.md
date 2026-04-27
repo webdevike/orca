@@ -1,6 +1,7 @@
 ---
 name: code-review
 description: Codex-driven code review of a diff/PR/worktree, writes findings to .orca/reviews/
+category: review
 triggers:
   - "code review"
   - "review code"

@@ -23,6 +23,7 @@ supported_agents: [string, ...]    # subset of {claude-code, codex, pi} this pla
 default_agent: string              # one of supported_agents
 
 # OPTIONAL
+category: enum                     # see Categories below; default "implementation"
 triggers: [string, ...]            # natural-language phrases that match user intent ("gsd", "run phase")
 poll_interval_s: int               # default 90; how often to capture-pane in active mode
 idle_threshold_s: int              # default 1800; no-output time before signal becomes "idle"
@@ -54,6 +55,21 @@ stop_when:                         # regex list; first match closes the pane
 
 (Markdown body — natural-language notes for orca, not parsed.)
 ```
+
+## Categories
+
+The `category` field tells the orchestrator how to fit this playbook into a multi-stage flow. Default is `implementation` if omitted — existing v1 playbooks stay valid without modification.
+
+| Value | Meaning | Examples |
+|-------|---------|----------|
+| `implementation` | Produces code changes / does the actual work. Triggers a "want validators?" offer when it closes via `task_complete`. | `gsd`, custom feature playbooks, refactor playbooks |
+| `review` | Produces structured findings under `.orca/reviews/`, never edits project code. Aggregated by the orchestrator after close. | `code-review`, `ui-validator`, future `security-review` / `perf-review` |
+| `dev-server` | Long-running support process (dev server, watcher, log tail). Doesn't terminate via `task_complete` under normal conditions. Excluded from review-chain triggers. | `dev-server` (TBD) |
+| `other` | Anything else. Orchestrator treats it generically — no special multi-stage hooks. | one-off automation |
+
+Orchestrators MUST tolerate unknown values (treat as `other`) and MUST treat a missing `category` as `implementation`.
+
+See `SKILL.md` `## Review chain` and Step 6 for how categories drive the post-close flow.
 
 ## Action vocabulary
 

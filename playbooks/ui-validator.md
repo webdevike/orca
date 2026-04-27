@@ -1,6 +1,7 @@
 ---
 name: ui-validator
 description: Codex drives chrome via computer use to QA a running app, writes findings to .orca/reviews/
+category: review
 triggers:
   - "ui validation"
   - "ui validator"

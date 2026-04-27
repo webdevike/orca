@@ -6,12 +6,33 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET="$HOME/.claude/skills/orca"
+SKILLS_DIR="$HOME/.claude/skills"
+TARGET="$SKILLS_DIR/orca"
+BACKUP_DIR="$HOME/.claude/.orca-backups"
 
 echo "🐋 orca installer"
-echo "  source: $REPO_ROOT"
-echo "  target: $TARGET"
+echo "  source:  $REPO_ROOT"
+echo "  target:  $TARGET"
+echo "  backups: $BACKUP_DIR"
 echo
+
+# Migrate any pre-existing backups that live under ~/.claude/skills/ — the
+# skill scanner indexes them by frontmatter name (which is "orca") and the
+# duplicate shadows the real symlink. Move them out of the skills dir.
+shopt -s nullglob
+legacy_backups=("$SKILLS_DIR"/orca.bak.*)
+shopt -u nullglob
+if (( ${#legacy_backups[@]} > 0 )); then
+  mkdir -p "$BACKUP_DIR"
+  for legacy in "${legacy_backups[@]}"; do
+    dest="$BACKUP_DIR/$(basename "$legacy")"
+    echo "🚚 Migrating legacy backup out of skills dir:"
+    echo "     $legacy"
+    echo "  → $dest"
+    mv "$legacy" "$dest"
+  done
+  echo
+fi
 
 if [[ -L "$TARGET" ]]; then
   current="$(readlink "$TARGET")"
@@ -24,13 +45,14 @@ if [[ -L "$TARGET" ]]; then
   rm "$TARGET"
 elif [[ -e "$TARGET" ]]; then
   stamp="$(date +%Y%m%d-%H%M%S)"
-  backup="$TARGET.bak.$stamp"
+  mkdir -p "$BACKUP_DIR"
+  backup="$BACKUP_DIR/orca.bak.$stamp"
   echo "📦 Existing skill dir at $TARGET"
-  echo "   Backing it up to $backup"
+  echo "   Backing it up to $backup (out of skills/ to avoid name collision)"
   mv "$TARGET" "$backup"
 fi
 
-mkdir -p "$(dirname "$TARGET")"
+mkdir -p "$SKILLS_DIR"
 ln -s "$REPO_ROOT" "$TARGET"
 
 echo "✅ Linked $TARGET → $REPO_ROOT"
@@ -39,3 +61,7 @@ echo "Next steps:"
 echo "  1. Restart Claude Code so the skill registry picks up the change."
 echo "  2. Invoke with /orca."
 echo "  3. (Optional) Copy bundled playbooks into ~/.orca/playbooks/ to customize them globally."
+echo
+if [[ -d "$BACKUP_DIR" ]]; then
+  echo "📦 Previous installs (if any) are in $BACKUP_DIR — safe to delete once you're confident the new install works."
+fi

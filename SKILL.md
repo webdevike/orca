@@ -163,14 +163,20 @@ For each worker the playbook implies (usually one — but cross-repo playbooks m
 2. Pick agent: explicit `agent=` arg → playbook's `default_agent` → first `supported_agents` entry. Verify the agent block exists in `spawn.agents.<name>`.
 3. Generate a `worker_id` (`{playbook}-{cwd-slug}-{disambiguator}`).
 4. Spawn the pane:
-   - **cmux**: `cmux new-split <direction>` (default `right`); capture `surface:N` and `workspace:M` from stdout (`OK surface:N workspace:M`).
-   - **tmux**: `tmux new-window -d -n "<worker_id>" -c "<spawn.cwd>"`.
+   - **cmux**: `cmux new-split <direction>` (default `right`); capture `surface:N` and `workspace:M` from stdout (`OK surface:N workspace:M`). **Note**: `cmux new-split` does NOT honor `spawn.cwd` — the new pane inherits the orchestrator's cwd. If the playbook sets a different `spawn.cwd`, you must `cd` into it as part of the launcher (see step 6).
+   - **tmux**: `tmux new-window -d -n "<worker_id>" -c "<spawn.cwd>"`. tmux honors `-c` directly, no extra cd needed.
 5. Sleep `spawn.agents.<agent>.initial_wait_s || 5` seconds.
-6. Send the launcher (`spawn.agents.<agent>.launcher` — must be the auto-perms variant). `cmux send-key … enter` or `tmux send-keys … Enter` to submit.
+6. **Send the launcher**, with cwd compensation for cmux:
+   - **cmux + spawn.cwd != orchestrator's cwd**: send `cd '<spawn.cwd>' && <launcher>` (single quotes around the path; assumes no embedded single quotes — if any, escape per shell rules).
+   - **cmux + spawn.cwd == orchestrator's cwd**: send `<launcher>` directly.
+   - **tmux**: send `<launcher>` directly (cwd was set at window creation).
+
+   The launcher must be the auto-perms variant (`cdp`, `codex --dangerously-bypass-approvals-and-sandbox`, `pi`, etc.). Submit with `cmux send-key … enter` or `tmux send-keys … Enter`.
 7. Sleep ~8s (Claude Code / codex boot time).
-8. Send `/clear` and Enter (skip if launcher is pi — pi has no slash command for that). Sleep 2s.
-9. Send the playbook's `spawn.agents.<agent>.initial` (with param substitution applied) + Enter.
-10. Append the worker to `state.json` with `last_signal: spawning`.
+8. **Handle first-run trust prompt** (Claude Code only, when launching `cdp` in a directory the user has never trusted in this profile). Capture the pane: if it shows `Is this a project you trust?` or `Yes, I trust this folder`, send a single Enter to accept, then sleep 2s. If the prompt isn't there, do nothing — the directory is already trusted. codex and pi have no equivalent prompt; skip this step for them.
+9. Send `/clear` and Enter (skip if launcher is pi — pi has no slash command for that). Sleep 2s.
+10. Send the playbook's `spawn.agents.<agent>.initial` (with param substitution applied) + Enter.
+11. Append the worker to `state.json` with `last_signal: spawning`. Persist `playbook` (the playbook's `name` field) and `category` (the playbook's `category` field, default `implementation` if unset) — both are read by Step 6 when deciding whether to offer the review chain.
 
 ### Step 5. Poll + advance (every active tick)
 
@@ -213,7 +219,19 @@ For each worker to close:
    - **cmux**: `cmux close-surface --surface <ref>` (add `--window <window>` if the worker is in a separate workspace).
    - **tmux**: `tmux kill-window -t <worker_id>`.
 3. Remove the worker entry from `state.json.workers` (or mark `last_signal: dead` if recovery is plausible — playbook-specific).
-4. If `state.json.workers` is empty and `/orca kill` was invoked, optionally archive `state.json` to `.orca/state.<ts>.json.bak` and start fresh on next invocation.
+4. **Offer review chain** (only when `last_signal: task_complete` AND closed worker's `category == "implementation"`):
+   - Check whether any review-class workers (`category: review`) for the same `worktree` are already in `state.json.workers[]` or have written to `.orca/reviews/` since this worker's `spawned_at`. If yes, skip — review chain is already in flight or done.
+   - Otherwise, surface the offer to the user with concrete invocations, e.g.:
+
+     > "{playbook} closed cleanly. Want me to spawn validators against {worktree}?"
+     > `/orca code-review worktree={worktree} target=<PR# or commit-range>`
+     > `/orca ui-validator worktree={worktree} app_url=<url>`
+
+   - Wait for confirmation before spawning. See `## Review chain` section below for the full pattern (parallel spawn, frontmatter aggregation, actionable-items handoff).
+5. **Aggregate review chain** (only when `last_signal: task_complete` AND closed worker's `category == "review"`):
+   - Look for sibling review-class workers in `state.json.workers[]`. If any are still active, defer aggregation — wait for them to close too.
+   - When all review-class workers for the same `worktree` have closed, run the aggregation procedure from `## Review chain` (glob `.orca/reviews/*.md`, parse frontmatter, summarize, surface actionable items).
+6. If `state.json.workers` is empty and `/orca kill` was invoked, optionally archive `state.json` to `.orca/state.<ts>.json.bak` and start fresh on next invocation.
 
 ## Polling cadence
 

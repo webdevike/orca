@@ -24,6 +24,7 @@ Single file, JSON, atomic-write (write to `.tmp`, then `mv`). Schema below.
     {
       "id": "gsd-goodword-3",
       "playbook": "gsd",
+      "category": "implementation",
       "agent": "claude-code",
       "params": { "repo": "/Users/ike/Code/Good/GoodWord-App", "phase": "3" },
       "pane": {
@@ -56,6 +57,7 @@ Single file, JSON, atomic-write (write to `.tmp`, then `mv`). Schema below.
 | `workers` | array | One entry per spawned worker pane. |
 | `workers[].id` | string | Stable identifier orca assigns at spawn. Pattern: `{playbook}-{short-cwd}-{disambiguator}`. Used in log filenames. |
 | `workers[].playbook` | string | Name of the playbook driving this worker (`gsd`, `claude-cdp`, etc.). |
+| `workers[].category` | string | Playbook category copied from frontmatter at spawn — `implementation` \| `review` \| `dev-server` \| `other`. Default `implementation` if the playbook didn't declare one. Used by Step 6 to decide whether to offer the review chain. |
 | `workers[].agent` | `"claude-code"` \| `"codex"` \| `"pi"` | Which agent runtime is in this pane. Determines which `spawn.agents.<name>` block was used. |
 | `workers[].params` | object | Resolved params (from playbook frontmatter + user input + defaults). String values only. |
 | `workers[].pane.ref` | string | Backend pane reference. cmux: `surface:N`. tmux: human label (`gsd-goodword-3`). |
