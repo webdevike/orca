@@ -230,8 +230,82 @@ For each worker to close:
 ├── state.json           # active workers, backend, last-poll timestamps, params
 ├── prd-{name}.md        # per-workstream requirements, used to answer worker questions
 ├── playbooks/           # project-local playbooks (override bundled/global)
+├── reviews/             # review-class playbook output (code-review, ui-validator, …)
 └── logs/{pane}-{ts}.txt # captured pane output on escalation
 ```
+
+## Review chain
+
+A **review-class playbook** is one whose output is a structured findings file, not a code change. Bundled examples: `code-review`, `ui-validator`. Future: `security-review`, `perf-review`, `accessibility-review`. They all follow the same convention — see [references/review-format.md](./references/review-format.md).
+
+### When to invoke
+
+After an **implementation playbook** (anything that ends in `task_complete` because real work shipped — `gsd`, custom feature playbooks, …) closes its workers, the orchestrator should offer to spawn review-class playbooks against the same worktree:
+
+> "{playbook} finished. Want me to spawn code-review and ui-validator against {worktree}?"
+
+Don't auto-spawn — confirm first. Validators are useful but not free (they consume the user's codex/Claude budget and a few minutes of wall time). The user should opt in.
+
+### Spawning multiple validators in parallel
+
+review-class playbooks don't depend on each other. Spawn them in the same tick:
+
+```bash
+# Each invocation goes through Step 4b independently
+/orca code-review worktree=<path> target=<PR# or commit-range> [prd=<path>]
+/orca ui-validator worktree=<path> app_url=<url> [target=<feature>] [acceptance_criteria=<path-or-text>]
+```
+
+Both end up in `state.json.workers[]` as separate entries. They run side-by-side in their own panes, write to `.orca/reviews/`, and close themselves via their `stop_when` rules.
+
+### Aggregation (after validators close)
+
+When a review-class worker closes (`task_complete` from matching `^REVIEW_DONE$`), don't just remove it from state and move on. Aggregate.
+
+1. Find all review files written since the earliest validator's `spawned_at`:
+   ```bash
+   find .orca/reviews -type f -name "*.md" -newer "$earliest_spawn_marker"
+   ```
+2. For each file, read **frontmatter only** (skip the body for triage):
+   ```bash
+   awk '/^---$/{c++; next} c==1{print} c==2{exit}' <file>
+   ```
+   Capture: `type`, `status`, `issue_count`, `target`.
+3. Build the user-facing summary:
+   ```
+   Review chain results:
+   - code-review: <status> (<issue_count> issues) — target <target>
+   - ui-validation: <status> (<issue_count> issues) — target <target>
+   ```
+4. If any `status` is `fail` or `needs-attention`, read those files' **`## Actionable items for next agent`** sections (the orchestrator's primary handoff target) and present them to the user with options:
+   - **Forward to a fix run**: `/orca gsd repo=<...> phase=fix` (or whatever implementation playbook is appropriate), passing the actionable items as the brief.
+   - **Send to specific live worker panes**: if any other workers are still in `state.json.workers[]`, `cmux send --surface <ref>` the relevant items per pane. (Manual in v1 — no `dispatch_to <worker>` action exists yet.)
+   - **Stop here**: user reads, decides what to do offline.
+5. If every `status` is `pass`, report clean and stop.
+
+### What NOT to do
+
+- **Don't** rewrite review files. They're append-only artifacts of the review run.
+- **Don't** auto-chain into a fix playbook without confirmation. Findings could be wrong, the user should triage.
+- **Don't** delete `.orca/reviews/` on `/orca kill`. They survive the session — `kill` only closes panes and clears `state.json.workers[]`.
+- **Don't** treat a missing review file as success. If a validator closed without writing one, that's a `dead`/`error` signal, not pass.
+
+### Future v1.1: declarative chaining
+
+Today the user (or orchestrator's prompt) decides when to invoke validators. v1.1 may add a `chain:` field to playbook frontmatter so an implementation playbook can declare its own follow-up:
+
+```yaml
+chain:
+  - playbook: code-review
+    on_complete: true
+    inherit_params: [worktree]
+  - playbook: ui-validator
+    on_complete: true
+    inherit_params: [worktree]
+    require_params: [app_url]
+```
+
+Not implemented in v1 — orchestrators must invoke validators manually for now.
 
 ## Helper Scripts
 
