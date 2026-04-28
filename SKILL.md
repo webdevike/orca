@@ -300,7 +300,7 @@ Both end up in `state.json.workers[]` as separate entries. They run side-by-side
 
 ### Aggregation (after validators close)
 
-When a review-class worker closes (`task_complete` from matching `^REVIEW_DONE$`), don't just remove it from state and move on. Aggregate.
+Aggregation runs from **Step 6 Phase 2** — after Phase 1 has captured and closed every queued worker's pane for the current tick. Do NOT aggregate during an individual worker's Phase 1 close: that recreates the same-tick race where a sibling's state entry vanishes before its pane is captured. The trigger is "Phase 1 for this tick is finished AND at least one closed worker had `category: review`," not "a single review worker just closed."
 
 1. Find all review files written since the earliest review worker's `spawned_at`. Review-class workers are kept in state.json with `last_signal: task_complete` until this aggregation runs (see Step 6 substep 3) — so the closing worker AND any earlier-closed siblings are all readable here.
 
