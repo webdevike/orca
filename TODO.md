@@ -2,6 +2,15 @@
 
 Deferred work. Not committed to a roadmap; just captured so it doesn't evaporate.
 
+## Strategic positioning (decision pending)
+
+Solo tool vs. team-grade. Orca's mechanics support both — the question is which *narrative* and *gap-prioritization* we commit to.
+
+- **Solo positioning**: orca as a fancy multi-pane GSD runner. Monolithic `STATE.md`, one developer, one timeline. Polish the `gsd` playbook + review chain; defer Beads; smoothness over scale.
+- **Team-grade positioning**: orca as parallel-agent orchestrator with a pluggable task source (Beads first). Multiple humans + their agent fleets pulling from a shared DAG of work, no merge contention. Prioritize Beads integration, `dispatch_to` action, AFK mode, cost ceiling. Headline feature = autonomous parallel work without coordination overhead.
+
+No commitment yet. Flagged so it stays visible when prioritizing v1.1+ — the answer reshapes the rest of this list.
+
 ## Smoke-test gaps still open
 
 These v1 surfaces have never been exercised end-to-end. The validator chain confirmed cmux/codex/code-review works; the rest is theoretical.
