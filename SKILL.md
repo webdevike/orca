@@ -237,16 +237,21 @@ For each worker to close (Phase 1):
    - **cmux**: `cmux close-surface --surface <ref>` (add `--window <window>` if the worker is in a separate workspace).
    - **tmux**: `tmux kill-window -t <worker_id>`.
 3. Remove the worker entry from `state.json.workers` — UNLESS the worker has `category: review`. **Review-class workers stay in state with `last_signal: task_complete`** until Phase 2's batch-removal. This preserves their `spawned_at` for the aggregation marker so artifacts from earlier-closed siblings aren't missed. (Mark `last_signal: dead` if recovery is plausible for non-review workers — playbook-specific.)
-4. **Offer review chain** (only when `last_signal: task_complete` AND closed worker's `category == "implementation"`):
+4. **Trigger review chain** (only when `last_signal: task_complete` AND closed worker's `category == "implementation"`):
    - Use the closed worker's `cwd` (persisted at spawn — see Step 4b#11) as the canonical worktree identifier. This works regardless of which param name the playbook used (`repo`, `worktree`, `target`, …).
    - Check whether any review-class workers (`category: review`) with the same `cwd` are already in `state.json.workers[]` or have written to `.orca/reviews/` since this worker's `spawned_at`. If yes, skip — review chain is already in flight or done.
-   - Otherwise, surface the offer to the user with concrete invocations, e.g.:
+   - **If the closed playbook declares a `chain:` field** (see `references/playbook-format.md` `## Chain`), auto-spawn each listed playbook with NO user prompt. For each chained playbook:
+     - Pass the closed worker's `cwd` as the chained playbook's `worktree` (or first dir-pointing param it declares — `worktree` / `repo` / `cwd`).
+     - Match other declared params by name from the parent's invocation params (e.g., parent's `app_url` → chained's `app_url`).
+     - If a chained playbook declares a required param that can't be resolved, escalate to user and do NOT half-spawn — atomic chain, all-or-nothing.
+     - Spawn each through Step 4b. Multiple chained playbooks spawn in the same tick (parallel).
+   - **Otherwise** (no `chain:` field), surface the manual offer to the user with concrete invocations:
 
      > "{playbook} closed cleanly. Want me to spawn validators against {cwd}?"
      > `/orca code-review worktree={cwd} target=<PR# or commit-range>`
      > `/orca ui-validator worktree={cwd} app_url=<url>`
 
-   - Wait for confirmation before spawning. See `## Review chain` section below for the full pattern (parallel spawn, frontmatter aggregation, actionable-items handoff).
+     Wait for confirmation before spawning. See `## Review chain` section below for the full pattern (parallel spawn, frontmatter aggregation, actionable-items handoff).
 After Phase 1 finishes for every worker in the close queue, do Phase 2 once per affected `cwd`:
 
 5. **Aggregate review chain** (only when at least one closed worker had `category == "review"`):
@@ -280,11 +285,14 @@ A **review-class playbook** is one whose output is a structured findings file, n
 
 ### When to invoke
 
-After an **implementation playbook** (anything that ends in `task_complete` because real work shipped — `gsd`, custom feature playbooks, …) closes its workers, the orchestrator should offer to spawn review-class playbooks against the same worktree:
+After an **implementation playbook** (anything that ends in `task_complete` because real work shipped — `gsd`, custom feature playbooks, …) closes its workers, the orchestrator triggers the review chain. Two paths:
 
-> "{playbook} finished. Want me to spawn code-review and ui-validator against {worktree}?"
+- **Declarative** (preferred for known-thorough flows): the implementation playbook declares a `chain:` list in its frontmatter (see `references/playbook-format.md` `## Chain`). Orca auto-spawns those playbooks on `task_complete` — no user prompt. This is how `gsd-verify.md` differs from `gsd.md`: same body, but `gsd-verify` declares `chain: [code-review, ui-validator]`.
+- **Manual** (default for playbooks without `chain:`): orca offers the spawn:
 
-Don't auto-spawn — confirm first. Validators are useful but not free (they consume the user's codex/Claude budget and a few minutes of wall time). The user should opt in.
+  > "{playbook} finished. Want me to spawn code-review and ui-validator against {worktree}?"
+
+  Validators consume codex/Claude budget and a few minutes of wall time. For unannotated playbooks, default to opt-in so the user picks when the cost is worth it.
 
 ### Spawning multiple validators in parallel
 
@@ -362,23 +370,6 @@ The validator briefs already tell codex/claude not to manufacture nits ("if the 
 - **Don't** delete `.orca/reviews/` on `/orca kill`. They survive the session — `kill` only closes panes and clears `state.json.workers[]`.
 - **Don't** treat a missing review file as success. If a validator closed without writing one, that's a `dead`/`error` signal, not pass.
 - **Don't** keep iterating past the convergence rules above just because the validator is willing to. Token budget and wall time matter.
-
-### Future v1.1: declarative chaining
-
-Today the user (or orchestrator's prompt) decides when to invoke validators. v1.1 may add a `chain:` field to playbook frontmatter so an implementation playbook can declare its own follow-up:
-
-```yaml
-chain:
-  - playbook: code-review
-    on_complete: true
-    inherit_params: [worktree]
-  - playbook: ui-validator
-    on_complete: true
-    inherit_params: [worktree]
-    require_params: [app_url]
-```
-
-Not implemented in v1 — orchestrators must invoke validators manually for now.
 
 ## Helper Scripts
 

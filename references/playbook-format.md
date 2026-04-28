@@ -27,6 +27,7 @@ category: enum                     # see Categories below; default "implementati
 triggers: [string, ...]            # natural-language phrases that match user intent ("gsd", "run phase")
 poll_interval_s: int               # default 90; how often to capture-pane in active mode
 idle_threshold_s: int              # default 1800; no-output time before signal becomes "idle"
+chain: [string, ...]               # see Chain below; review-class playbooks to auto-spawn on task_complete
 
 # REQUIRED
 params:                            # parameters the playbook needs at invocation time
@@ -70,6 +71,25 @@ The `category` field tells the orchestrator how to fit this playbook into a mult
 Orchestrators MUST tolerate unknown values (treat as `other`) and MUST treat a missing `category` as `implementation`.
 
 See `SKILL.md` `## Review chain` and Step 6 for how categories drive the post-close flow.
+
+## Chain
+
+Optional list of review-class playbook names to **auto-spawn** when this playbook closes via `task_complete`. Replaces the manual "want validators?" prompt for declarative workflows.
+
+```yaml
+chain:
+  - code-review
+  - ui-validator
+```
+
+Semantics:
+- Each listed playbook MUST be a `category: review` playbook in the lookup paths. Unknown names → orchestrator escalates, does not silently skip.
+- Auto-spawn fires only when the closed worker's `last_signal == task_complete` AND `category == implementation`. `dead`, `idle`, or non-implementation closes don't trigger.
+- Param wiring: each chained playbook's `worktree` (or first dir-pointing param it declares) gets the closed worker's `cwd`. Other declared params on the chained playbook are looked up by name in the parent's invocation params; missing required params → orchestrator errors before any chain spawn (atomic — don't half-spawn).
+- Chained spawns go through Step 4b independently and run in parallel — same pattern as the manual "spawn multiple validators" flow.
+- A playbook that itself declares `category: review` must NOT have a `chain:` field (no chain-of-chains in v1).
+
+Playbooks without `chain:` keep the existing manual-offer behavior. The chain is opt-in per playbook — `gsd.md` (no chain) and `gsd-verify.md` (with chain) coexist as the fast vs thorough modes.
 
 ## Action vocabulary
 

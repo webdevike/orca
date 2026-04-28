@@ -24,7 +24,7 @@ These v1 surfaces have never been exercised end-to-end. The validator chain conf
 
 ## v1.1 candidates (additive, low risk)
 
-- [ ] **Declarative `chain:` field** on playbook frontmatter so an implementation playbook can declare its own follow-up validators (gsd → auto-spawn code-review + ui-validator). Sketched in SKILL.md `## Review chain` "Future v1.1" subsection.
+- [x] **Declarative `chain:` field** on playbook frontmatter so an implementation playbook can declare its own follow-up validators (gsd → auto-spawn code-review + ui-validator). Shipped — see `references/playbook-format.md` `## Chain` and `playbooks/gsd-verify.md` for the worked example.
 - [ ] **`dispatch_to <worker_id>` action** in playbook DSL — send findings to a live worker pane without manual `cmux send`. Closes the gap noted in SKILL.md aggregation step ("Manual in v1").
 - [ ] **`scripts/validate-playbook.sh`** — referenced in `references/playbook-format.md` "## Validating a playbook" section as a TODO.
 - [ ] **`scripts/spawn-worker.sh`** wrapper — encodes the Step 4b sequence (cd, launcher, sleep, trust prompt, /clear, brief) into one callable script. Reduces orchestrator drift across sessions.
