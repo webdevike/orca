@@ -343,12 +343,25 @@ Aggregation runs from **Step 6 Phase 2** — after Phase 1 has captured and clos
    - **Stop here**: user reads, decides what to do offline.
 5. If every `status` is `pass`, report clean and stop.
 
+### When to stop iterating
+
+A "fix → re-validate → fix again" loop is useful but can run forever finding smaller and smaller nits. Stop the chain when ANY of these are true:
+
+1. **Run reports `status: pass`** — no actionable items. Ship.
+2. **Two consecutive runs find only `medium` / `low` issues** (zero `high` / `critical` across both runs). The pattern is doc nits, not functional bugs. Stop, add the remaining items to a project backlog, ship.
+3. **Three iterations on the same target** — hard cap. Beyond this, diminishing returns dominate; the cost of another full validator pass exceeds the marginal value. Triage what's left manually.
+
+When stopping for reasons 2 or 3, surface the remaining items to the user explicitly (e.g. "stopping iteration — 2 medium-severity items not addressed: [list]. Add to backlog or ship as-is?"). Never silently drop findings.
+
+The validator briefs already tell codex/claude not to manufacture nits ("if the diff is genuinely clean, `status: pass` and `issue_count: 0`"), but the orchestrator is the final gate — even a strict reviewer can't avoid finding *something* worth mentioning on every pass.
+
 ### What NOT to do
 
 - **Don't** rewrite review files. They're append-only artifacts of the review run.
 - **Don't** auto-chain into a fix playbook without confirmation. Findings could be wrong, the user should triage.
 - **Don't** delete `.orca/reviews/` on `/orca kill`. They survive the session — `kill` only closes panes and clears `state.json.workers[]`.
 - **Don't** treat a missing review file as success. If a validator closed without writing one, that's a `dead`/`error` signal, not pass.
+- **Don't** keep iterating past the convergence rules above just because the validator is willing to. Token budget and wall time matter.
 
 ### Future v1.1: declarative chaining
 
