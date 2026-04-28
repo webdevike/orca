@@ -223,13 +223,20 @@ After processing all workers:
 
 ### Step 6. Close worker(s)
 
-For each worker to close:
+**Two-phase ordering** when multiple workers are queued (e.g. several review-class workers all hit `REVIEW_DONE` in the same tick):
+
+- **Phase 1 (per-worker)**: substeps 1–4 — capture pane, close pane, remove from state if appropriate, offer review chain. Run for every queued worker.
+- **Phase 2 (per-cwd, ONCE)**: substep 5 — aggregate review chain, then batch-remove. Runs only after Phase 1 has finished for every worker in the queue.
+
+This ordering matters because aggregation in substep 5 may batch-remove sibling review workers that haven't yet had their pane captured/closed. Always close panes first, aggregate last.
+
+For each worker to close (Phase 1):
 
 1. Capture last 100 lines to `.orca/logs/<worker_id>-<ts>.txt` (preserve evidence).
 2. Close the pane:
    - **cmux**: `cmux close-surface --surface <ref>` (add `--window <window>` if the worker is in a separate workspace).
    - **tmux**: `tmux kill-window -t <worker_id>`.
-3. Remove the worker entry from `state.json.workers` — UNLESS the worker has `category: review`. **Review-class workers stay in state with `last_signal: task_complete`** until substep 5's aggregation step batch-removes them. This preserves their `spawned_at` for the aggregation marker so artifacts from earlier-closed siblings aren't missed. (Mark `last_signal: dead` if recovery is plausible for non-review workers — playbook-specific.)
+3. Remove the worker entry from `state.json.workers` — UNLESS the worker has `category: review`. **Review-class workers stay in state with `last_signal: task_complete`** until Phase 2's batch-removal. This preserves their `spawned_at` for the aggregation marker so artifacts from earlier-closed siblings aren't missed. (Mark `last_signal: dead` if recovery is plausible for non-review workers — playbook-specific.)
 4. **Offer review chain** (only when `last_signal: task_complete` AND closed worker's `category == "implementation"`):
    - Use the closed worker's `cwd` (persisted at spawn — see Step 4b#11) as the canonical worktree identifier. This works regardless of which param name the playbook used (`repo`, `worktree`, `target`, …).
    - Check whether any review-class workers (`category: review`) with the same `cwd` are already in `state.json.workers[]` or have written to `.orca/reviews/` since this worker's `spawned_at`. If yes, skip — review chain is already in flight or done.
@@ -240,10 +247,12 @@ For each worker to close:
      > `/orca ui-validator worktree={cwd} app_url=<url>`
 
    - Wait for confirmation before spawning. See `## Review chain` section below for the full pattern (parallel spawn, frontmatter aggregation, actionable-items handoff).
-5. **Aggregate review chain** (only when `last_signal: task_complete` AND closed worker's `category == "review"`):
-   - Look for sibling review-class workers (same `cwd`) in `state.json.workers[]`. **Closed-but-not-removed siblings (per substep 3) count as still-present.** If any have `last_signal != task_complete`, defer aggregation — wait for them to close too.
+After Phase 1 finishes for every worker in the close queue, do Phase 2 once per affected `cwd`:
+
+5. **Aggregate review chain** (only when at least one closed worker had `category == "review"`):
+   - Look for sibling review-class workers (same `cwd`) in `state.json.workers[]`. **Closed-but-not-removed siblings (per substep 3) count as still-present.** If any have `last_signal != task_complete`, defer aggregation — wait for them to close on a future tick.
    - When all review-class workers for the same `cwd` are `task_complete`, run the aggregation procedure from `## Review chain`. The aggregation snippet reads `spawned_at` from the (still-present) review workers in state.json, so all sibling timestamps are available — no stashing needed.
-   - After aggregation completes, **batch-remove** every `task_complete` review-class worker for that `cwd` from `state.json.workers[]`.
+   - After aggregation completes, **batch-remove** every `task_complete` review-class worker for that `cwd` from `state.json.workers[]`. By Phase 1's contract their panes are already closed, so removal is safe.
 6. If `state.json.workers` is empty and `/orca kill` was invoked, optionally archive `state.json` to `.orca/state.<ts>.json.bak` and start fresh on next invocation.
 
 ## Polling cadence
