@@ -229,7 +229,7 @@ For each worker to close:
 2. Close the pane:
    - **cmux**: `cmux close-surface --surface <ref>` (add `--window <window>` if the worker is in a separate workspace).
    - **tmux**: `tmux kill-window -t <worker_id>`.
-3. Remove the worker entry from `state.json.workers` (or mark `last_signal: dead` if recovery is plausible — playbook-specific).
+3. Remove the worker entry from `state.json.workers` — UNLESS the worker has `category: review`. **Review-class workers stay in state with `last_signal: task_complete`** until substep 5's aggregation step batch-removes them. This preserves their `spawned_at` for the aggregation marker so artifacts from earlier-closed siblings aren't missed. (Mark `last_signal: dead` if recovery is plausible for non-review workers — playbook-specific.)
 4. **Offer review chain** (only when `last_signal: task_complete` AND closed worker's `category == "implementation"`):
    - Use the closed worker's `cwd` (persisted at spawn — see Step 4b#11) as the canonical worktree identifier. This works regardless of which param name the playbook used (`repo`, `worktree`, `target`, …).
    - Check whether any review-class workers (`category: review`) with the same `cwd` are already in `state.json.workers[]` or have written to `.orca/reviews/` since this worker's `spawned_at`. If yes, skip — review chain is already in flight or done.
@@ -241,9 +241,9 @@ For each worker to close:
 
    - Wait for confirmation before spawning. See `## Review chain` section below for the full pattern (parallel spawn, frontmatter aggregation, actionable-items handoff).
 5. **Aggregate review chain** (only when `last_signal: task_complete` AND closed worker's `category == "review"`):
-   - **Capture the closing worker's `spawned_at` BEFORE substep 3 above removes the entry** — the aggregation step needs it. Stash it in a local variable (e.g. `closing_spawned_at=$(jq -r ".workers[] | select(.id==\"$WORKER_ID\") | .spawned_at" .orca/state.json)`) at the top of Step 6 for any review-class worker. Without this, aggregation runs against a state.json that has zero matching workers.
-   - Look for sibling review-class workers in `state.json.workers[]` with the same `cwd`. If any are still active, defer aggregation — wait for them to close too.
-   - When all review-class workers for the same `cwd` have closed, run the aggregation procedure from `## Review chain` using the **earliest of `closing_spawned_at` plus any siblings' `spawned_at`** (passing it explicitly, since live state may no longer contain the closed workers).
+   - Look for sibling review-class workers (same `cwd`) in `state.json.workers[]`. **Closed-but-not-removed siblings (per substep 3) count as still-present.** If any have `last_signal != task_complete`, defer aggregation — wait for them to close too.
+   - When all review-class workers for the same `cwd` are `task_complete`, run the aggregation procedure from `## Review chain`. The aggregation snippet reads `spawned_at` from the (still-present) review workers in state.json, so all sibling timestamps are available — no stashing needed.
+   - After aggregation completes, **batch-remove** every `task_complete` review-class worker for that `cwd` from `state.json.workers[]`.
 6. If `state.json.workers` is empty and `/orca kill` was invoked, optionally archive `state.json` to `.orca/state.<ts>.json.bak` and start fresh on next invocation.
 
 ## Polling cadence
@@ -293,19 +293,19 @@ Both end up in `state.json.workers[]` as separate entries. They run side-by-side
 
 When a review-class worker closes (`task_complete` from matching `^REVIEW_DONE$`), don't just remove it from state and move on. Aggregate.
 
-1. Find all review files written since the earliest validator's `spawned_at`. The timestamp must be captured BEFORE the closing worker is removed from state (see Step 6 substep 5) — once removed, jq filters return empty. Use a marker file rather than `find -newermt`: BSD `find` rejects ISO8601 with `Z` ("Can't parse date/time"), and BSD vs GNU disagree on whether `T`-without-`Z` is UTC or local. A marker file's mtime sidesteps both gotchas.
+1. Find all review files written since the earliest review worker's `spawned_at`. Review-class workers are kept in state.json with `last_signal: task_complete` until this aggregation runs (see Step 6 substep 3) — so the closing worker AND any earlier-closed siblings are all readable here.
 
    ```bash
-   # $closing_spawned_at was stashed at the top of Step 6 before the worker was removed.
-   # Fold in any sibling review workers (same cwd) still in live state:
-   sibling_min=$(jq -r --arg cwd "$CWD" '.workers[] | select(.category=="review" and .cwd==$cwd) | .spawned_at' .orca/state.json | sort | head -1)
-   earliest_spawned_at=$(printf '%s\n%s\n' "$closing_spawned_at" "$sibling_min" | grep -v '^$' | sort | head -1)
+   # All task_complete review workers for this cwd are still in state. Find the earliest spawned_at.
+   earliest_spawned_at=$(jq -r --arg cwd "$CWD" \
+     '.workers[] | select(.category=="review" and .cwd==$cwd) | .spawned_at' \
+     .orca/state.json | sort | head -1)
 
    # Convert ISO8601 UTC → epoch seconds (portable across BSD/GNU date)
    if epoch=$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$earliest_spawned_at" +%s 2>/dev/null); then : ;  # macOS BSD date
    else epoch=$(date -u -d "$earliest_spawned_at" +%s); fi                                            # GNU date
 
-   # Create a marker file with that mtime, glob via -newer (POSIX, no parsing needed)
+   # Create a marker file with that mtime, glob via -newer (POSIX, no date-parse needed in find)
    marker=$(mktemp)
    if [[ "$(uname)" == "Darwin" ]]; then
      touch -t "$(date -r "$epoch" +%Y%m%d%H%M.%S)" "$marker"     # BSD touch
@@ -316,7 +316,7 @@ When a review-class worker closes (`task_complete` from matching `^REVIEW_DONE$`
    rm "$marker"
    ```
 
-   Yes, it's verbose. The simpler `find -newermt "$earliest_spawned_at"` form does NOT work on macOS for ISO8601-with-Z values, and silently disagrees on timezone interpretation across BSD/GNU when stripped. The marker file is the boring portable answer.
+   Why a marker file instead of `find -newermt "$ts"`: BSD `find` rejects ISO8601 with `Z` ("Can't parse date/time"), and BSD vs GNU silently disagree on whether `T`-without-`Z` is UTC or local. Marker mtime is unambiguous on both platforms.
 2. For each file, read **frontmatter only** (skip the body for triage):
    ```bash
    awk '/^---$/{c++; next} c==1{print} c==2{exit}' <file>
