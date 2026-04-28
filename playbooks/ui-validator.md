@@ -1,6 +1,6 @@
 ---
 name: ui-validator
-description: Codex drives chrome via computer use to QA a running app, writes findings to .orca/reviews/
+description: Codex drives chrome via computer use to QA a running app, writes findings to .orca/reviews/ and files medium+ findings into beads when a beads DB exists
 category: review
 triggers:
   - "ui validation"
@@ -113,13 +113,32 @@ spawn:
 
            See `~/.claude/skills/orca/references/review-format.md` for the canonical convention.
 
-        6. After the file is written, echo this single line on its own, with NO other text on that line:
+        6. **File actionable items into beads (if a beads DB exists).** Probe with `bd ready` in `{worktree}` — if it errors (beads not installed, or no DB initialized), skip this step entirely. Otherwise, for each entry under `## Actionable items for next agent` whose underlying issue severity is medium, high, or critical, run:
+
+           ```
+           bd create "[<severity>] <route> — <short summary>" \
+             -d "Steps:
+           1. <step>
+           2. <step>
+
+           Expected: <expected>
+           Actual: <actual>
+
+           Screenshot: .orca/reviews/screenshots/{worker_id}/<n>.png
+           Source: .orca/reviews/ui-{worker_id}-{ts}.md" \
+             -p <priority> \
+             -l ui-validator,severity-<severity>
+           ```
+
+           Severity → priority mapping: `critical` → `P0`, `high` → `P1`, `medium` → `P2`. Skip low-severity items — they stay in the review file only. Title is **positional** in `bd create` (not `--title`); body goes via `-d`/`--description`. If a `bd create` call errors, append a one-line note to the review's `## Notes` section (e.g., "beads: failed to file <title>: <error>") and continue. Don't fail the review over beads.
+
+        7. After the file is written (and beads issues filed if applicable), echo this single line on its own, with NO other text on that line:
 
            ```
            REVIEW_DONE
            ```
 
-           If the app is unreachable or the write failed, still write a placeholder review with `status: fail` explaining the reason, then echo `REVIEW_DONE`. The orchestrator reads frontmatter+body to triage; a missing file would be ambiguous, so always emit something.
+           If the app is unreachable or the write failed, still write a placeholder review with `status: fail` explaining the reason, then echo `REVIEW_DONE`. The orchestrator reads frontmatter+body to triage; a missing file would be ambiguous, so always emit something. Beads-filing failures do NOT trigger `status: fail` — log them in `## Notes` and proceed.
 
         ## Hard rules
 
@@ -167,6 +186,14 @@ The contract is single-marker: write the review file, emit `REVIEW_DONE`. Failur
 | Worker hangs in browser without emitting `REVIEW_DONE` | Computer use stuck on a modal or login screen | Check pane logs; provide an `acceptance_criteria` that includes test credentials if behind auth |
 | Issues reported but no screenshots | Codex skipped the screenshot step | Re-read the brief — screenshots are required for failures. Worth treating as a `needs-attention` followup on the playbook itself. |
 | `status: pass` despite obvious bugs | Validator covered too narrow a slice | Pass a more specific `target` or `acceptance_criteria` next run |
+
+## Beads integration
+
+When a beads database exists in the worktree (`bd ready` succeeds), the worker also files medium-and-above findings as `bd create` issues. UI bug tickets carry their reproduction steps, expected/actual, and screenshot path so a future agent can pick up and fix without re-running the validator.
+
+This is the **worker's** concern, not orca's. Orca remains beads-agnostic; the integration lives entirely in this playbook prose. Beads-less repos are unaffected — the step is a no-op when no DB exists.
+
+Mirrors the same pattern in `code-review.md`. Same caveat: re-running on the same target creates duplicate beads issues; v1 has no dedup.
 
 ## Cross-checks with code-review
 

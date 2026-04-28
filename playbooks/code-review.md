@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Codex-driven code review of a diff/PR/worktree, writes findings to .orca/reviews/
+description: Codex-driven code review of a diff/PR/worktree, writes findings to .orca/reviews/ and files medium+ findings into beads when a beads DB exists
 category: review
 triggers:
   - "code review"
@@ -95,13 +95,28 @@ spawn:
 
            See `~/.claude/skills/orca/references/review-format.md` for the full convention if any field is unclear.
 
-        4. After the file is written, echo this single line on its own, with NO other text on that line:
+        4. **File actionable items into beads (if a beads DB exists).** Probe with `bd ready` in `{worktree}` — if it errors (beads not installed, or no DB initialized), skip this step entirely. Otherwise, for each entry under `## Actionable items for next agent` whose underlying issue severity is medium, high, or critical, run:
+
+           ```
+           bd create "[<severity>] <file:line> — <short summary>" \
+             -d "<why it matters>
+
+           Fix: <how to fix>
+
+           Source: .orca/reviews/code-{worker_id}-{ts}.md" \
+             -p <priority> \
+             -l code-review,severity-<severity>
+           ```
+
+           Severity → priority mapping: `critical` → `P0`, `high` → `P1`, `medium` → `P2`. Skip low-severity items — they stay in the review file only. Title is **positional** in `bd create` (not `--title`); body goes via `-d`/`--description`. If a `bd create` call errors, append a one-line note to the review's `## Notes` section (e.g., "beads: failed to file <title>: <error>") and continue. Don't fail the review over beads.
+
+        5. After the file is written (and beads issues filed if applicable), echo this single line on its own, with NO other text on that line:
 
            ```
            REVIEW_DONE
            ```
 
-           If you couldn't write the file (filesystem error, permissions, etc.), still write a placeholder review with `status: fail` explaining the reason in `## Summary`, then echo `REVIEW_DONE`. The orchestrator reads frontmatter+body to triage; a missing file would be ambiguous, so always emit something.
+           If you couldn't write the file (filesystem error, permissions, etc.), still write a placeholder review with `status: fail` explaining the reason in `## Summary`, then echo `REVIEW_DONE`. The orchestrator reads frontmatter+body to triage; a missing file would be ambiguous, so always emit something. Beads-filing failures do NOT trigger `status: fail` — log them in `## Notes` and proceed.
 
         ## Hard rules
 
@@ -133,6 +148,14 @@ Codex's bash + agentic loop is well-suited to "read large diffs, compare against
 ## Codex AGENTS.md collision
 
 Codex auto-loads any `AGENTS.md` from cwd. If `{worktree}` has its own AGENTS.md, it merges with this brief. That's usually fine (the project conventions enrich the review) but if the project's AGENTS.md tells codex to "always fix issues you find", it conflicts with our hard rule above. The brief's hard rules win — codex resolves conflicts by preferring the most recent instruction, and the brief is sent after AGENTS.md is loaded.
+
+## Beads integration
+
+When a beads database exists in the worktree (`bd ready` succeeds), the worker also files medium-and-above findings as `bd create` issues. Findings stop evaporating after the review session — the orchestrator (or a future scout playbook) can later pull from beads to dispatch fixes.
+
+This is the **worker's** concern, not orca's. Orca remains beads-agnostic; the integration lives entirely in this playbook prose. Beads-less repos are unaffected — the step is a no-op when no DB exists.
+
+Known limitation: re-running review on the same diff will create duplicate beads issues. Dedup is not handled in v1; if it matters, close stale issues manually or via a future scout playbook.
 
 ## Output you should NOT trust
 

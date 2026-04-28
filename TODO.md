@@ -40,12 +40,13 @@ These v1 surfaces have never been exercised end-to-end. The validator chain conf
 
 ### Beads (Steve Yegge's coding-agent memory system — github.com/steveyegge/beads)
 
-Two integration shapes:
+Three integration shapes, in increasing scope:
 
-1. **As a playbook** (v1.1): `playbooks/beads-pull.md` calls `bd ready --json`, picks the next issue, formats the body as a brief for a child playbook. Additive, orca knows nothing about beads.
-2. **As an alt entry mode** (v2): `/orca beads` loops on `bd ready`, runs playbooks, files review-chain findings back as `bd create` issues with `blocks` relationships. Bigger commitment — touches orca's invocation surface.
+1. **Review-chain → beads sink** (shipped for `code-review` and `ui-validator`): the reviewer worker files medium+ findings via `bd create` when a beads DB exists in the worktree. Lives entirely in playbook prose; orca learns nothing.
+2. **As a playbook** (deferred): `playbooks/beads-pull.md` to pull ready issues and dispatch them to other playbooks. Originally framed as "additive, orca knows nothing about beads," but the scout pattern actually requires a new `spawn_playbook` action (or equivalent dispatcher primitive) — orca's v1 DSL is "drive one worker," not "fetch then dispatch." Real DSL extension, not a free playbook.
+3. **As an alt entry mode** (v2): `/orca beads` loops on `bd ready`, runs playbooks, files findings back. Vision shift — makes orca a scout on top of a megaphone. Touches orca's invocation surface.
 
-Pair with the review-chain → beads sink: actionable items from validator runs become beads issues instead of evaporating after a session ends.
+Defer 2 and 3 until the solo-vs-team positioning question is answered. The autonomous-loop story (worker → review → beads → dispatch → worker) only earns its keep at team-grade; for solo work, GSD's internal queue + manual orca invocation is enough.
 
 ### Pi orchestrator (`pi/README.md` is currently a placeholder)
 
