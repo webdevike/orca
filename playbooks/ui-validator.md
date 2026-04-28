@@ -47,7 +47,12 @@ spawn:
 
         1. Use **computer use** to open chrome and navigate to {app_url}. Wait for the page to render.
 
-        2. If `{acceptance_criteria}` points to a path, read it. If it's inline text, treat it as the spec. If empty, derive criteria from the target focus + a quick scan of the worktree (look at recent commits, README, any `.planning/` or `docs/` directories).
+        2. Resolve `{acceptance_criteria}`:
+           - **Glob characters** (`*`, `?`, `[]`): expand. If zero matches, `status: fail` review with reason. If multiple matches, pick the **most recently modified** file (`ls -t` semantics) and proceed — typical case is the active phase's UAT.md.
+           - **Path**: read the file.
+           - **Inline text**: treat the string as the spec.
+           - **Empty**: derive criteria from `{target}` + a scan of the worktree (recent commits, README, any `.planning/` or `docs/`).
+           - **`*-UAT.md` filename match**: enter **UAT mode** (see `## UAT mode` notes below). Output gains a `## UAT Responses` section that orca's `delegate` action consumes.
 
         3. For each criterion (or each major flow if no criteria given), exercise it in the browser:
            - Click through the golden path. Confirm expected outcomes.
@@ -186,6 +191,46 @@ The contract is single-marker: write the review file, emit `REVIEW_DONE`. Failur
 | Worker hangs in browser without emitting `REVIEW_DONE` | Computer use stuck on a modal or login screen | Check pane logs; provide an `acceptance_criteria` that includes test credentials if behind auth |
 | Issues reported but no screenshots | Codex skipped the screenshot step | Re-read the brief — screenshots are required for failures. Worth treating as a `needs-attention` followup on the playbook itself. |
 | `status: pass` despite obvious bugs | Validator covered too narrow a slice | Pass a more specific `target` or `acceptance_criteria` next run |
+
+## UAT mode
+
+Triggered when `{acceptance_criteria}` resolves to a file matching `*-UAT.md` (GSD's verify-work format). The criteria file has structure:
+
+```markdown
+## Tests
+
+### 1. {Test Name}
+expected: {observable behavior}
+result: pending
+
+### 2. {Test Name}
+expected: {observable behavior}
+result: pending
+```
+
+In UAT mode, the validator MUST:
+
+1. Parse the `## Tests` section to enumerate tests in order. Capture `(N, name, expected)` per entry.
+2. Exercise each test in the browser per the standard ui-validation flow (golden path + at least one edge case if relevant).
+3. Add a **`## UAT Responses`** section to the review file with exactly one line per test in this format:
+
+   ```
+   ## UAT Responses
+
+   1. pass
+   2. issue: <what was wrong, verbatim freeform — GSD parses this and infers severity>
+   3. skipped: <reason — couldn't reach, requires login I don't have, etc.>
+   4. pass
+   ```
+
+   - `pass` if observed matches expected.
+   - `issue: <text>` if it didn't. The text is treated like the user typed it directly into GSD's checkpoint prompt — terse, descriptive, no fluff.
+   - `skipped: <reason>` if you couldn't run the test.
+   - One line per test, numbered to match the source. Do NOT skip numbers; if a test is unreachable, emit `skipped:`.
+
+This section is consumed by orca's `delegate` action — each line becomes the user-response for the corresponding GSD `CHECKPOINT: Verification Required` prompt.
+
+Standard issue capture (`## Issues` with severity, screenshots, etc.) STILL applies in UAT mode — UAT Responses is *additional*, not a replacement. Issues found during a test should appear both as `## Issues` entries AND as `issue:` lines in `## UAT Responses`. Beads sink (medium+ findings → `bd create`) also applies.
 
 ## Beads integration
 

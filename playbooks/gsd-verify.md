@@ -35,6 +35,19 @@ spawn:
       initial_wait_s: 8
       initial: "/clear && /gsd:plan-phase {phase}"
 watch:
+  # Verify-work checkpoint interception — delegates to ui-validator, replays answers.
+  # Must come first so /gsd:verify-work CHECKPOINTs route through ui-validator
+  # instead of stalling on a human prompt.
+  - pattern: "CHECKPOINT: Verification Required[\\s\\S]{1,300}Test (\\d+):"
+    action: delegate
+    to: ui-validator
+    with:
+      worktree: "{cwd}"
+      app_url: "{app_url}"
+      acceptance_criteria: ".planning/phases/*-*/*-UAT.md"
+    relay_section: "## UAT Responses"
+
+  # GSD's normal phase progression.
   - pattern: "PHASE \\d+ COMPLETE ✓"
     action: advance
     next: "/clear && /gsd:execute-phase {phase}"
@@ -79,6 +92,21 @@ The chain processor (SKILL.md Step 6 substep 4) auto-wires params on spawn:
 - **`ui-validator`** receives `worktree={repo}` and `app_url={app_url}`.
 
 `app_url` is required at invocation — orca escalates BEFORE spawning the gsd worker if it's missing. Atomic chain: either the whole flow is wired up, or none of it spawns.
+
+## Verify-work auto-routing
+
+The first watch rule intercepts GSD's `/gsd:verify-work` CHECKPOINT prompts and delegates them to ui-validator. Flow:
+
+1. GSD enters verify-work after a phase completes, presents test 1 in a `CHECKPOINT: Verification Required` box.
+2. Orca's watch matches; the `delegate` action spawns ui-validator with `acceptance_criteria` pointing to the UAT.md GSD just created (glob picks the most recent match).
+3. ui-validator reads UAT.md, exercises every test in the browser, writes `## UAT Responses` to its review file (one line per test: `pass`, `issue: ...`, or `skipped: ...`).
+4. ui-validator closes; orca parses the responses into a queue keyed by test number.
+5. Each subsequent CHECKPOINT match (test 2, test 3, …) dequeues the matching response by test number and `send_text`s it to the GSD pane. GSD treats it like a typed user reply.
+6. After the last response, GSD runs its own diagnose → plan → execute fix loop (handled internally by `/gsd:verify-work` — orca doesn't touch it).
+
+**No human in the loop** for verify-work. If ui-validator's queue is missing a key (e.g., GSD adds a test mid-flow), orca escalates and pauses; the user can answer manually.
+
+See `SKILL.md` `## Delegation` for the full delegate action procedure.
 
 ## Everything else
 

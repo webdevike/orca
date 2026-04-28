@@ -102,8 +102,29 @@ Playbooks without `chain:` keep the existing manual-offer behavior. The chain is
 | `stop` | Mark worker `task_complete`, close pane, remove from active list. | not used |
 | `escalate` | Capture pane to `.orca/logs/`, add to `questions_pending`, ping user, do nothing else this tick. | not used |
 | `wait` | Do nothing. Useful when you want to log a signal without acting (e.g., classify long-running thinking states). | not used |
+| `delegate` | Spawn a child playbook on first match; on subsequent matches, replay the child's queued responses back to this pane via `send_text`. Uses structured fields (`to`, `with`, `relay_section`) instead of `next`. See `## Delegate action` below. | structured |
 
 Custom actions are not supported in v1. If you need new behavior, propose adding it to this enum.
+
+## Delegate action
+
+The `delegate` action lets a watch rule spawn a child playbook on first match (e.g. ui-validator answering GSD verify-work checkpoints), then route the child's structured output back into the parent's pane on subsequent matches.
+
+```yaml
+watch:
+  - pattern: "CHECKPOINT[\\s\\S]{0,300}Test (\\d+):"   # capture group [0] = test number
+    action: delegate
+    to: ui-validator                                    # child playbook name
+    with:                                               # params for child spawn (substitution applies)
+      worktree: "{cwd}"
+      app_url: "{app_url}"
+      acceptance_criteria: ".planning/phases/{phase}-*/{phase}-UAT.md"
+    relay_section: "## UAT Responses"                   # section in child's review file to parse
+```
+
+Required fields: `to`, `with`. Optional: `relay_section` (default `## Responses`).
+
+Lifecycle: see `SKILL.md` `## Delegation`.
 
 ## Pattern syntax
 
@@ -111,6 +132,7 @@ Custom actions are not supported in v1. If you need new behavior, propose adding
 - Case-sensitive by default; prefix with `(?i)` for insensitive.
 - Patterns match against the **last 30–50 lines** of pane output captured each poll. Multi-line patterns work but anchor to single lines when possible (e.g., `^PHASE \d+ COMPLETE`).
 - First matching `watch` rule wins per tick — order matters. Put exit/stop conditions before noise patterns.
+- **Capture groups**: parens in the pattern produce captures, addressable as `{capture[0]}`, `{capture[1]}`, … in `next:` templates and `delegate.with` substitution. `{capture[0]}` is the *first* capture group (NOT the whole match — bash-style numbering, not POSIX).
 
 ## Parameter substitution
 

@@ -206,8 +206,11 @@ For each worker in `state.json` whose `last_signal` is not `task_complete` or `d
    | `stop` | Mark `last_signal: task_complete`. Pane will be closed in Step 6. |
    | `escalate` | Capture last 100 lines to `.orca/logs/<worker_id>-<ts>.txt`, add to `questions_pending`, ping user, no further action this tick. |
    | `wait` | No-op. Update `last_signal` only. |
+   | `delegate` | See `## Delegation` for the full per-tick procedure. Behavior depends on parent's `awaiting`/`relay_state`: spawn child on first match, no-op while child runs, replay queued responses keyed by `{capture[0]}` once child closes. |
 
    Full action enum and `next` template syntax: [references/playbook-format.md](./references/playbook-format.md#action-vocabulary).
+
+   **If the closed worker has `delegate_parent` set in state.json**, after running its own Step 6 close, also: read its review file's `delegate_relay_section` (per the parent's stored value), parse `<N>. <text>` lines into a map, and write that map to the parent's `relay_queue`. Set parent's `relay_state: "queued"`, clear parent's `awaiting`. The relay itself happens on the parent's NEXT tick when its watch rule matches again.
 
 5. If no `watch` pattern matched, run `scripts/detect-state.sh --stdin` against the captured text for a generic signal (`executing` / `idle` / `error` / etc.). Log but don't act on generic signals — the playbook's rules are authoritative.
 6. Append a `history` entry to the worker (`{ts, signal, action}`).
@@ -370,6 +373,77 @@ The validator briefs already tell codex/claude not to manufacture nits ("if the 
 - **Don't** delete `.orca/reviews/` on `/orca kill`. They survive the session — `kill` only closes panes and clears `state.json.workers[]`.
 - **Don't** treat a missing review file as success. If a validator closed without writing one, that's a `dead`/`error` signal, not pass.
 - **Don't** keep iterating past the convergence rules above just because the validator is willing to. Token budget and wall time matter.
+
+## Delegation
+
+The `delegate` watch action lets a parent worker offload a question/checkpoint to a child playbook *mid-flow*, then relay the child's answer back into the parent's pane via `send_text`. Use case: GSD's `/gsd:verify-work` runs a series of `CHECKPOINT: Verification Required` prompts; orca delegates each to ui-validator, which exercises the test in a real browser and writes structured responses. Parent never blocks on a human.
+
+See `references/playbook-format.md` `## Delegate action` for syntax.
+
+### Lifecycle
+
+A worker spawned by a `delegate`-action match is called a **delegate child**. It's a normal playbook spawn (Step 4b) but tagged with `delegate_parent: <parent_worker_id>` in `state.json` so orca can route results back later.
+
+State fields added on the parent at first match:
+
+```json
+{
+  "worker_id": "gsd-uat-01",
+  "awaiting": "ui-val-02",          // the delegate child's worker_id
+  "delegate_relay_section": "## UAT Responses",  // copied from watch rule
+  "relay_queue": null,              // populated when child closes
+  "relay_state": "awaiting"         // "awaiting" | "queued" | "drained"
+}
+```
+
+### Procedure (per tick)
+
+When evaluating watch rules for a worker:
+
+1. **First match of a `delegate` rule** (parent's `awaiting` is null):
+   - Substitute `delegate.with` params (incl. `{capture[N]}`, `{cwd}`, etc.).
+   - Spawn the child via Step 4b. Child's `delegate_parent` in state.json points back to this worker.
+   - Set parent's `awaiting: <child_worker_id>`, `delegate_relay_section`, `relay_state: "awaiting"`.
+   - Do NOT send anything to parent's pane this tick.
+   - Skip remaining watch rules for the parent this tick.
+
+2. **Match while parent's `awaiting` is set AND `relay_state == "awaiting"`** (child still running):
+   - No-op for this rule. Don't re-spawn, don't relay.
+   - Other watch rules that don't conflict (e.g., `send_enter` for editor prompts) MAY still fire — order in `watch:` decides.
+
+3. **Child closes** (handled in Step 6 close logic, not here):
+   - Read child's review file at `.orca/reviews/<child_review>.md`.
+   - Parse the `delegate_relay_section` from the body. Each line in the format `<N>. <text>` becomes a queue entry keyed by `<N>`.
+   - Set parent's `relay_queue` to the parsed map (`{1: "pass", 2: "issue: ...", ...}`).
+   - Set `relay_state: "queued"`, clear `awaiting`.
+   - Child's worker entry follows normal Step 6 close (review-class workers stay until aggregation; non-review children are removed).
+
+4. **Match while `relay_state == "queued"` and queue non-empty**:
+   - Use the rule's pattern's first capture group (`{capture[0]}`) as the lookup key.
+   - If `relay_queue[key]` exists: `send_text` that response to the parent's pane. Remove that key from the queue.
+   - If queue becomes empty: `relay_state: "drained"`.
+   - If key NOT in queue: log to `.orca/logs/<parent_id>-relay-miss.txt`, `escalate` to user (the validator missed a test).
+
+5. **Match while `relay_state == "drained"`**: fall through to next watch rule. The delegate is exhausted — user can re-trigger by manually invoking the same action or letting another rule handle the prompt.
+
+### Idle suppression
+
+While `awaiting != null`, the parent's idle threshold is suspended. Don't mark `last_signal: idle` or escalate; the child is doing real work and the parent's pane intentionally shows no progress.
+
+Once `awaiting` clears (relay_state queued or drained), normal idle rules resume.
+
+### Convention for child playbooks
+
+Children invoked via `delegate` MUST write a `<relay_section>` (default `## Responses`) to their review file with one line per response in the format `<N>. <text>`. Anything else is informational (the rest of the review still gets aggregated).
+
+ui-validator's UAT mode (criteria points to a `*-UAT.md`) is the canonical example — see `playbooks/ui-validator.md` `## UAT mode`.
+
+### Limitations (v1)
+
+- One delegate child at a time per parent. A second `delegate` match while `awaiting` is set is a no-op.
+- No timeout on `awaiting` — if child hangs, parent stays paused indefinitely. Manual `/orca kill <child_id>` clears it (orca should detect orphaned `awaiting` on next tick and unset).
+- Queue is exhausted in match-by-key order, not insertion order. Multiple matches with the same `{capture[0]}` would only fire once per key.
+- Children of children (delegate chains) are not supported. A delegate child's playbook MUST NOT itself contain `delegate` watch rules.
 
 ## Helper Scripts
 
