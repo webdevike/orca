@@ -20,6 +20,8 @@ Workflow-agnostic multi-pane orchestrator. Spawns workers in cmux or tmux panes,
 | `/orca status` | Capture-pane each tracked worker, summarize signals |
 | `/orca stop <pane-ref>` | Close one worker pane, update state |
 | `/orca kill` | Close all orca-managed panes, clear state |
+| `/orca --voice` (or `/orca --voice on`) | Enable voice I/O for the current orca pane (see [Voice mode](#voice-mode-orca---voice)). After processing the flag, continue with whatever else was on the command line — `/orca --voice` alone behaves like `/orca`; `/orca --voice gsd phase=2` applies the playbook. |
+| `/orca --voice off` | Disable voice I/O (unregister the orca pane; daemon keeps running so other tools can speak). |
 
 ## Backend Detection (first thing every run)
 
@@ -109,6 +111,70 @@ All worker launchers default to their **dangerous/auto-approval** flag. Orca can
 
 A playbook may set `launcher_mode: safe` to opt out, but this is rare — the user has already accepted the safety tradeoff for orchestration ergonomics.
 
+## Delegate perception to subagents
+
+Orca's main context fills fast with **raw pane outputs, file dumps, log tails** — high tokens, low information. Each `cmux read-screen` lands 500–2000 tokens of mostly-noise; each `git show` on a sprawling commit is similar; multi-kilobyte worker briefs land verbatim in context when written from the main thread. Across many ticks this dominates context spend even though orca itself does coordination, not analysis.
+
+**Fix**: route perception-heavy reads through Claude Code's `Agent` tool. The subagent has its own ~200K context window and only its **final response** returns to orca's main context. A 1500-token pane capture becomes an 80-token "still executing, last action: edit foo.ts" — ~20:1 reduction on the perception layer.
+
+### When to delegate
+
+- **Polling worker panes** — read the surface, return a 2-line status (signal + last action). Per-tick savings compound across many workers and many ticks.
+- **Reading large state files** — `.orca/state.json` past ~5KB; `.orca/log.md` past a few sessions. Subagent extracts the specific fields/sessions you asked about.
+- **Reading dev-server / pane logs** — tails are mostly HMR + access-log noise. Subagent grep-and-summarizes errors / warnings / 401–500 responses.
+- **Drafting worker briefs** — multi-kilobyte briefs are wasteful in main context. Subagent writes the brief to `.orca/logs/brief-<id>.md` and returns just the file path.
+- **Reading screenshots** — visual context is heavy. Subagent describes the image in 2–3 lines.
+- **Inspecting big git diffs** — `git show <sha>` on a sprawling commit; subagent extracts what changed at the file/intent level.
+
+### When NOT to delegate
+
+- **Spawning workers** — `cmux new-split` is a single tool call returning one OK line. Round-trip cost > savings.
+- **Sending text to a known pane** — single `cmux send`; cheap and the result is empty.
+- **`state.json` updates** — `Edit` is bounded and the diff is small.
+- **Cases where the result IS the next decision input** — e.g., "is worker_id X still active?" The subagent overhead exceeds the savings; just `Read` and decide.
+
+### How (concrete patterns)
+
+**Poll subagent** — replaces a direct `cmux read-screen` in Step 5:
+
+```
+Agent({
+  description: "Poll worker",
+  subagent_type: "general-purpose",
+  prompt: "Run `cmux read-screen --surface surface:N --lines 25` and return: (1) one-line current status, (2) any errors visible, (3) whether IMPLEMENTATION_COMPLETE or IMPLEMENTATION_BLOCKED appears in the output. Don't return the full pane text."
+})
+```
+
+**Brief-drafting subagent** — replaces composing a multi-kilobyte brief inline before sending it to a worker:
+
+```
+Agent({
+  description: "Draft worker brief",
+  prompt: "Write a brief at `.orca/logs/brief-<worker_id>.md` following references/worker-brief-template.md. Scope: <one-line>. Params: <key=value …>. Return only the absolute path of the file you wrote."
+})
+```
+
+**Log-analysis subagent** — replaces tailing a noisy server log:
+
+```
+Agent({
+  description: "Tail server log",
+  prompt: "Read /tmp/wha-flo-dev.log lines 1-500. Return: errors (with line numbers), warnings, any 401/500 responses, and a 2-line summary. Skip routine HMR + access-log noise."
+})
+```
+
+### Token math
+
+- Direct pane poll: ~1500 tokens of raw output enter orca context.
+- Subagent poll: ~80 tokens (request + 2-line return) enter orca context.
+- ~20:1 reduction on the perception layer. Across ~20 ticks per session and N workers, this is the difference between "session ran out of context" and "session kept going."
+
+### Coordination implications
+
+- **Subagents are synchronous** — orca waits for the result before continuing the same turn. That's fine; coordination doesn't need parallelism, just lean reads.
+- **Results aren't ground truth indefinitely** — re-poll between substantial state changes. Don't cache a subagent's "no errors visible" across many ticks.
+- **Don't chain subagents from subagents** — flatten. Each delegation should hit a single perception target and return.
+
 ## Procedure
 
 Follow these steps in order on every `/orca` invocation. Numbered steps are prescriptive — do them, in this order, every time.
@@ -147,6 +213,8 @@ If absent, create `.orca/` directory and write a fresh `state.json` skeleton (wo
 | `/orca kill` | Step 6 (close all), then exit |
 | `/orca` arrives via `/loop` rewake | Step 5: poll + advance, then re-schedule |
 
+**Strip flags before routing.** If `--voice` (or `--voice on` / `--voice off`) is present anywhere in the args, run the voice-mode handler from the [Voice mode](#voice-mode-orca---voice) section *first*, then strip the flag and re-evaluate the remaining args against this table (so `/orca --voice` alone routes to Step 4a; `/orca --voice gsd phase=2` routes to Step 4b).
+
 ### Step 4a. Planning mode
 
 1. List available playbooks (scan `./.orca/playbooks/`, then `~/.orca/playbooks/`, then bundled `playbooks/`).
@@ -181,9 +249,11 @@ For each worker the playbook implies (usually one — but cross-repo playbooks m
    - pi: no equivalent prompt — skip
 
    After sending Enter, sleep 2s. If no prompt was shown, the directory is already trusted and Enter on an empty input line is harmless.
-9. Send `/clear` and Enter (skip if launcher is pi — pi has no slash command for that). Sleep 2s.
-10. Send the playbook's `spawn.agents.<agent>.initial` (with param substitution applied) + Enter.
-11. Append the worker to `state.json` with `last_signal: spawning`. Persist:
+9. Send the playbook's `spawn.agents.<agent>.initial` (with param substitution applied) + Enter.
+
+   > **Prefer subagent brief-drafting.** When the `initial` payload is a substantial brief (say, more than ~50 lines), delegate the drafting to an `Agent` subagent that writes the brief to `.orca/logs/brief-<worker_id>.md` and returns just the path — then send that file's contents (or a `cat <path>` reference) to the worker. Keeps the kilobytes of brief text out of orca's main context. See "Delegate perception to subagents" above.
+
+10. Append the worker to `state.json` with `last_signal: spawning`. Persist:
     - `playbook` — the playbook's `name` field
     - `category` — the playbook's `category` field (default `implementation` if unset)
     - `cwd` — the resolved `spawn.cwd` after parameter substitution (canonical worktree identifier; used by Step 6 review-chain matching regardless of which param name the playbook used: `repo`, `worktree`, `target`, etc.)
@@ -191,6 +261,8 @@ For each worker the playbook implies (usually one — but cross-repo playbooks m
     Step 6 reads all three when deciding whether to offer the review chain and how to glob review files.
 
 ### Step 5. Poll + advance (every active tick)
+
+> **Prefer subagent polling.** For each worker, instead of `cmux read-screen` directly from orca's main thread, delegate to an `Agent` subagent that runs the capture and returns just the status signals (1–3 lines). Raw pane text never enters orca's context. See "Delegate perception to subagents" above.
 
 For each worker in `state.json` whose `last_signal` is not `task_complete` or `dead`:
 
@@ -504,10 +576,77 @@ These dispatch by reading `backend` from `.orca/state.json`. Useful for one-off 
 |-------|-----|
 | Write project code from orca | Spawn a worker, delegate |
 | Use `claude` instead of `cdp` (or any safe-mode equivalent) | Auto-perms launcher every time |
-| Skip `/clear` between agentic commands | Always `/clear` + ~2s sleep before new dispatch |
 | Hardcode workflow logic into orca | Put it in a playbook |
 | Hardcode tmux or cmux commands | Use the backend abstraction in `references/backends.md` |
 | Poll faster than 60s in active mode | Sub-60s burns compute for no benefit |
 | Forget to capture `cmux new-split` stdout | The new `surface:N` is in the OK line — parse it; don't re-list |
 | Forget `--window` for cross-window cmux workspaces | Splits don't need it; separate workspaces do |
 | Auto-close panes you didn't spawn | Only kill panes tracked in `.orca/state.json` |
+
+## Voice mode (`/orca --voice`)
+
+Optional. Wraps the orca pane with bidirectional voice I/O so you can listen to orca's responses and reply by talking. Workers stay text-only — voice only speaks/types **for the orca pane itself**, since orca already narrates whatever its workers are doing.
+
+**Architecture in one paragraph.** The talk-to-claude project at `~/Code/talk-to-claude/` ships a small HTTP daemon that owns TTS, recording, transcription, and key injection. A user-global Claude Code Stop hook (`~/.claude/settings.json`) POSTs to that daemon on every Claude turn; the daemon checks whether the firing session's `$CMUX_SURFACE_ID` matches the orca pane that registered itself, and only speaks for matches. A Raycast hotkey POSTs to `/talk` to record a turn (sox VAD → Whisper → `cmux send` into the orca pane).
+
+### Requirements
+
+| Need | Why |
+|------|-----|
+| `OPENAI_API_KEY` env var | Whisper transcription |
+| `sox`, `curl`, `python3` | Recording, HTTP, JSON |
+| `~/.local/bin/say` (kokoro wrapper) **or** override `TTC_SAY` | TTS playback |
+| Raycast Script Command directory pointing at `~/Code/talk-to-claude/raycast-scripts/` | Hotkey for push-to-talk |
+| Stop hook installed in `~/.claude/settings.json` (one-time) | Forwards turn-end events to the daemon |
+
+### Handler procedure (when `--voice` appears in args)
+
+1. **Verify cmux** — voice mode requires `$CMUX_SURFACE_ID` to be set. If empty (e.g., running under tmux or bare terminal), abort with: "🐋 voice mode requires cmux." Do NOT proceed to start the daemon.
+2. **Branch on subcommand**:
+   - `--voice off` → `curl -sf -X POST http://127.0.0.1:8848/unregister` ; report "🐋 voice off (daemon kept running)" ; strip flag and continue routing.
+   - `--voice` or `--voice on` (default) → continue to step 3.
+3. **Start the daemon if not running** —
+   ```bash
+   if ! curl -sf --max-time 0.5 http://127.0.0.1:8848/health >/dev/null 2>&1; then
+     # IMPORTANT: do NOT nohup/disown. cmux's socket auth uses the caller's
+     # process ancestry — if the daemon detaches and reparents to launchd,
+     # `cmux send` from inside the daemon fails silently (rc != 0, empty
+     # stderr). Keep it as a backgrounded child of this shell so the cmux
+     # ancestor chain is preserved.
+     mkdir -p /tmp/talk-to-claude
+     python3 "$HOME/Code/talk-to-claude/voice-daemon.py" \
+       >>/tmp/talk-to-claude/daemon.stdout 2>&1 &
+     for _ in 1 2 3 4 5 6 7 8; do
+       sleep 0.25
+       curl -sf --max-time 0.5 http://127.0.0.1:8848/health >/dev/null 2>&1 && break
+     done
+   fi
+   ```
+4. **Register the orca pane** —
+   ```bash
+   curl -sf -X POST http://127.0.0.1:8848/register \
+     -H "Content-Type: application/json" \
+     -d "{\"surface_id\":\"$CMUX_SURFACE_ID\",\"workspace_id\":\"$CMUX_WORKSPACE_ID\"}"
+   ```
+5. **Confirm to the user** with a one-liner that includes the registered surface and the hotkey hint, e.g.:
+   "🎙 voice on (surface:NN). Press your Raycast hotkey to talk; orca's replies will be spoken."
+6. **Strip `--voice` from args** and continue routing per [Step 3](#step-3-route-by-user-input). `/orca --voice` alone falls through to planning (Step 4a); `/orca --voice gsd phase=2` continues to Step 4b.
+
+### Daemon endpoints (for diagnostics)
+
+| Endpoint | Use |
+|----------|-----|
+| `GET /health` | "ok" if up |
+| `GET /status` | JSON snapshot — registered surface, last assistant text, etc. |
+| `POST /register` `{surface_id, workspace_id}` | Claim TTS/PTT for that pane |
+| `POST /unregister` | Release the pane |
+| `POST /stop` | Internal — wired from Claude Code Stop hook |
+| `POST /talk` | Internal — wired from Raycast PTT hotkey |
+| `POST /silence` | Kill in-flight TTS |
+
+### Gotchas
+
+- The daemon survives orca exits on purpose (so `/orca --voice off` then `/orca --voice` later is cheap). To fully kill it: `pkill -f voice-daemon.py`.
+- The Stop hook is global, so any Claude session can register itself in principle — but only the registered surface will be served. Workers' Stop hooks no-op silently.
+- Whisper occasionally hallucinates "you" / "thank you" on near-silence; the daemon already filters those.
+- `cmux send` types literal characters and submits with Enter. If you want to dictate something multi-line, do it in two presses (orca's prompt buffer accepts the second message as a continuation).

@@ -1,5 +1,17 @@
 # orca — CHANGELOG
 
+## 2026-04-29 — Subagent delegation pattern for orchestrator context efficiency
+
+Long orca sessions burn main-thread context on perception (pane polls, log tails, big state reads, multi-kilobyte brief drafts) even though orca itself does coordination, not analysis. Each `cmux read-screen` lands 500–2000 tokens of mostly-noise into orca's window; over 20 ticks × N workers this dominates spend and forces premature session resets.
+
+### Changes
+- `SKILL.md` — new top-level section "Delegate perception to subagents" between `## Auto-permission Mode` and `## Procedure`. Documents when to delegate (pane polls, big state files, log tails, brief drafting, screenshots, large diffs), when not to (single-call cmux primitives, Edit on state.json, decision-input reads), three concrete `Agent({…})` patterns, and the ~20:1 token-math illustration.
+- `SKILL.md` — added "prefer subagent" callouts inside `### Step 4b` (near the brief-send sub-step) and `### Step 5` (above the per-worker poll loop) pointing at the new section. Existing procedure text unchanged so playbook authors don't have to re-learn the flow.
+
+### Worth noting (not coded)
+- The pattern is purely orchestrator-side. Worker spawning, polling cadence, and the cmux primitive layer are unchanged — only what flows through orca's main context shifts.
+- Subagents are synchronous; coordination doesn't need parallelism, just lean reads. Re-poll between substantial state changes — don't cache a subagent's "no errors" across many ticks.
+
 ## 2026-04-28 — Worker brief template (from Flodoc orchestration session)
 
 Real-world friction observed during a multi-worker CSS-modules conversion + bug-fix session in `app.flodoc.ai`: ~30% of workers emitted `IMPLEMENTATION_COMPLETE` with a dirty working tree, forcing the orchestrator to commit on their behalf. Two fixes shipped on the same SHA later in the session (`16e55e0`, `b64cc81`). Root cause was uneven coverage of the worker-orchestrator contract across custom playbooks — some briefs spelled it out, others didn't.

@@ -25,8 +25,6 @@ spawn:
       launcher: cdp
       initial_wait_s: 8
       initial: |-
-        /clear
-
         # <Playbook name> — {scope_param}
 
         You are a worker spawned by orca to <one-sentence purpose>. Read this brief, then do the work. **Commit before you signal complete.**
