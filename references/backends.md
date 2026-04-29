@@ -19,6 +19,16 @@ Persist `ORCA_BACKEND` to `.orca/state.json` so subsequent ticks skip detection.
 
 ## Primitive Table
 
+> **Ref format gotcha (cmux)** — `--surface` / `--workspace` parse a bare number as a **positional index**, not an ID. `cmux new-split` returns `OK surface:N workspace:M`; capture and pass the **full ref** every time. Stripping the prefix and passing the number alone fails as soon as the index shifts (and on most calls, immediately).
+>
+> ```bash
+> # ❌ wrong — bare number is treated as a positional index
+> cmux send --surface 36 "hello"          # Error: Surface index not found
+>
+> # ✅ right — full ref preserved from new-split / list-pane-surfaces
+> cmux send --surface surface:36 "hello"  # OK surface:36 workspace:13
+> ```
+
 | Action | cmux | tmux |
 |--------|------|------|
 | Spawn pane (split) | `cmux new-split <left\|right\|up\|down>` → stdout `OK surface:N workspace:M` | `tmux split-window -d -h -t "<src>"` (or `-v`) |

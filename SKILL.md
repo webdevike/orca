@@ -157,6 +157,8 @@ If absent, create `.orca/` directory and write a fresh `state.json` skeleton (wo
 
 ### Step 4b. Apply playbook (spawn worker)
 
+> **Ref format gotcha (cmux)**: every `--surface` / `--workspace` flag below expects the **full ref** (`surface:N`, `workspace:M`) — exactly as `cmux new-split` returns it on the `OK …` line. A bare numeric (`--surface 36`) is parsed as a *positional index*, not an ID, and fails with `Error: Surface index not found` on virtually every call. Capture the ref string verbatim and pass it through unchanged. Wrong: `cmux send --surface 36 …`. Right: `cmux send --surface surface:36 …`. (See [references/backends.md](./references/backends.md#primitive-table) for the full callout.)
+
 For each worker the playbook implies (usually one — but cross-repo playbooks may declare more):
 
 1. Resolve params (user input + playbook defaults). If any required param is missing, error and exit.
@@ -276,11 +278,35 @@ After Phase 1 finishes for every worker in the close queue, do Phase 2 once per 
 ```
 .orca/
 ├── state.json           # active workers, backend, last-poll timestamps, params
+├── log.md               # append-only chronological session log (cross-session memory)
 ├── prd-{name}.md        # per-workstream requirements, used to answer worker questions
 ├── playbooks/           # project-local playbooks (override bundled/global)
 ├── reviews/             # review-class playbook output (code-review, ui-validator, …)
 └── logs/{pane}-{ts}.txt # captured pane output on escalation
 ```
+
+### Session log (`.orca/log.md`)
+
+`state.json` only holds the *current* state — once a worker is removed, only its `completed_workers` entry survives, and that's terse. The orchestrator's reasoning, decisions, friction patterns, and cross-worker context are lost across sessions unless captured.
+
+Maintain `.orca/log.md` as an **append-only** human-readable timeline. On every session, the orchestrator should:
+
+1. **First invocation of a session** — append a `## YYYY-MM-DD — <one-line session theme>` header.
+2. **On every meaningful event** — append a row or bullet under the current session:
+   - Worker spawned: `| HH:MM | spawn | <worker_id> | <surface> | <one-line scope> |`
+   - Worker closed: include outcome + commits landed
+   - Decision made (e.g. "skipped chain", "split into N parallel", "committed worker's uncommitted diff")
+   - Friction noted (e.g. "worker forgot to commit", "test endpoint kept 500-ing")
+3. **At session end / handoff** — write a "Net result" paragraph naming what shipped and what's open.
+
+Why log instead of just relying on `state.json`:
+- `state.json.completed_workers` is a flat list of facts; `log.md` captures *why* and *what changed in approach*.
+- A new orchestrator session reading `.orca/log.md` can pick up exactly where the previous one left off, including friction patterns to avoid.
+- The user can audit a session post-hoc without scrolling pane logs.
+
+Format guidance: keep entries terse (1 line each where possible). A table per session is fine when there are >3 workers. Include git SHAs for every shipped commit.
+
+The log survives `/orca kill` — it is NEVER cleared. Only the user manually removes it.
 
 ## Review chain
 
