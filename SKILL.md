@@ -1,11 +1,11 @@
 ---
 name: orca
-description: 🐋 Workflow-agnostic multi-pane orchestrator. Spawns and coordinates worker sessions in cmux or tmux panes via pluggable playbooks. Use when the user invokes /orca, asks to "orchestrate", "manage workstreams in parallel", "run multiple agents", or wants something to keep multiple Claude/codex/dev-server sessions advancing without manual juggling. Orca picks a backend at runtime (cmux if available, else tmux), reads playbooks from .orca/playbooks/ (project) or ~/.orca/playbooks/ (global) or its bundled defaults, and drives workers via spawn/send/read primitives. Orca NEVER writes project code — it only delegates to worker panes.
+description: 🐋 Workflow-agnostic multi-pane orchestrator. Spawns and coordinates worker sessions in cmux or tmux panes via pluggable playbooks. Use when the user invokes /orca, asks to "orchestrate", "manage workstreams in parallel", "run multiple agents/omp sessions", or wants something to keep multiple omp (or Claude Code / codex) worker sessions advancing without manual juggling (e.g. running GSD phases to completion). Primary runtime is omp. Picks a backend at runtime (cmux if available, else tmux), reads playbooks from .orca/playbooks/ (project) or ~/.orca/playbooks/ (global) or its bundled defaults, and drives workers via spawn/send/read primitives. Orca NEVER writes project code; it only delegates to worker panes.
 ---
 
 # 🐋 orca
 
-Workflow-agnostic multi-pane orchestrator. Spawns workers in cmux or tmux panes, applies a **playbook** that defines the workflow, monitors progress, escalates when stuck.
+Workflow-agnostic multi-pane orchestrator. Spawns workers in cmux or tmux panes, applies a **playbook** that defines the workflow, monitors progress, escalates when stuck. Primary runtime is **omp** (`@oh-my-pi/pi-coding-agent`, the `omp` binary; orca's schema calls this agent `pi`); Claude Code and codex are supported alternatives.
 
 ## Core Constraint
 
@@ -89,22 +89,23 @@ The markdown body holds free-form notes orca reads as natural-language guidance 
 
 ## Agents as orchestrator OR worker
 
-Coding agents (Claude Code, codex, pi) are interchangeable runtimes. Any of them can run **as orchestrator** (executing this skill / its peer configs) or **as worker** (spawned by an orchestrator, executing a playbook). The orca repo therefore ships multiple orchestrator configs so each agent has a way to play that role:
+Coding agents (**omp**/`pi`, Claude Code, codex) are interchangeable runtimes. Any of them can run **as orchestrator** (executing this skill / its peer configs) or **as worker** (spawned by an orchestrator, executing a playbook). omp is the primary runtime here. This SKILL.md IS omp's orchestrator config. The orca repo ships peer configs so the other agents can play the role too:
 
 | Agent | Orchestrator config | Lives at |
 |-------|--------------------|----------|
+| omp (`pi`) | `SKILL.md` (this file), omp reads it directly; `pi/README.md` covers omp-worker specifics | `~/.claude/skills/orca/SKILL.md` (omp discovers it via its `claude` skill provider, priority 80) |
 | Claude Code | `SKILL.md` (this file) | `~/.claude/skills/orca/SKILL.md` |
 | codex | `AGENTS.md` (codex's project-config convention) | repo root, codex picks it up automatically when launched in the dir |
-| pi | TBD — pi has TS Extensions / Skills / Prompt Templates; orca-as-pi-skill is a future addition | `pi/` directory in repo (placeholder) |
 
 A worker pane only ever runs an agent in single-agent mode — the orchestration skill is irrelevant there. Workers consume the **playbook**, not orca itself.
 
 ## Auto-permission Mode
 
-All worker launchers default to their **dangerous/auto-approval** flag. Orca cannot babysit interactive permission prompts — they would block every action.
+Workers must launch in an unattended (non-prompting) mode, so orca cannot babysit interactive permission prompts. **omp needs no bypass flag: its default `approvalMode` is `yolo`** (auto-approves read/write/exec), and subagents always run headless yolo. Claude Code and codex each need their explicit bypass flag.
 
 | Tool | Auto launcher |
 |------|---------------|
+| omp (`pi`) | `omp`: default `approvalMode: yolo` already auto-approves everything, no flag needed. Force with `--yolo` / `--auto-approve` if the user's global config lowered it to `write`/`always-ask`. |
 | Claude Code | `cdp` (skip-permissions wrapper) |
 | codex | `codex --dangerously-bypass-approvals-and-sandbox` (or current full-auto flag) |
 | Other agentic CLIs | their equivalent unattended flag |
@@ -162,6 +163,8 @@ Agent({
   prompt: "Read /tmp/wha-flo-dev.log lines 1-500. Return: errors (with line numbers), warnings, any 401/500 responses, and a 2-line summary. Skip routine HMR + access-log noise."
 })
 ```
+**omp orchestrator:** use the `task` tool (or an `eval` `agent()` thunk) in place of `Agent({…})`, same prompt, same 2-line return contract. omp subagents run headless (`approvalMode: yolo`) with their own context window, so the perception savings are identical.
+
 
 ### Token math
 
@@ -174,6 +177,27 @@ Agent({
 - **Subagents are synchronous** — orca waits for the result before continuing the same turn. That's fine; coordination doesn't need parallelism, just lean reads.
 - **Results aren't ground truth indefinitely** — re-poll between substantial state changes. Don't cache a subagent's "no errors visible" across many ticks.
 - **Don't chain subagents from subagents** — flatten. Each delegation should hit a single perception target and return.
+
+## Orchestrator context budget & handoff
+
+A long autonomous run (many phases, many ticks) eventually fills the orchestrator's OWN context, not just the workers'. Orca is built to survive this: orchestration state lives on disk (`.orca/state.json` + `.orca/log.md`), perception is delegated (above), and a fresh orchestrator session can read the state and continue. Three layers, in order of preference:
+
+1. **Stay lean by construction.** Delegate every pane read / large-file read / brief draft to a subagent (see "Delegate perception"). Keep durable facts in `state.json` + `log.md`, never only in context. This alone pushes the ceiling far out.
+
+2. **Let omp compact.** Under omp the orchestrator gets built-in automatic context compaction (`omp://compaction.md`); older turns summarized in place, no action needed. Extends runway for free.
+
+3. **Self-monitor, then hand off.** omp writes its own live context occupancy every turn into its session JSONL as `contextSnapshot.promptTokens` (each turn resends the whole context, so this is exact, not a proxy; `nonMessageTokens` is the fixed system+tools floor). Read it periodically:
+
+   ```bash
+   # current orchestrator context occupancy (tokens); cwd-slug session file
+   slug=$(echo "$PWD" | sed 's#/#-#g')
+   sess=$(ls -t ~/.omp/agent/sessions/"$slug"/*.jsonl 2>/dev/null | head -1)
+   grep -o '"promptTokens":[0-9]*' "$sess" | tail -1 | cut -d: -f2
+   ```
+
+   When occupancy crosses ~75% of the model's window, **hand off**: flush `state.json` + a `## Handoff` note in `log.md` (live worker surface refs, phase, next action), then spawn a fresh orchestrator session (new tab / `/loop` rewake) that reads `state.json` and resumes. GSD is sequential, so there is at most ONE live worker to reattach to and its surface ref is already in `state.json`, so handoff is a non-event.
+
+Claude Code / codex orchestrators lack `promptTokens` introspection; there, rely on layers 1–2 and hand off on the harness's own context warning.
 
 ## Procedure
 
@@ -241,12 +265,12 @@ For each worker the playbook implies (usually one — but cross-repo playbooks m
    - **cmux + spawn.cwd == orchestrator's cwd**: send `<launcher>` directly.
    - **tmux**: send `<launcher>` directly (cwd was set at window creation).
 
-   The launcher must be the auto-perms variant (`cdp`, `codex --dangerously-bypass-approvals-and-sandbox`, `pi`, etc.). Submit with `cmux send-key … enter` or `tmux send-keys … Enter`.
+   The launcher must be the unattended variant: `omp` (default `yolo`, no flag), `cdp` for Claude Code, `codex --dangerously-bypass-approvals-and-sandbox` for codex. Submit with `cmux send-key … enter` or `tmux send-keys … Enter`.
 7. Sleep ~8s (Claude Code / codex boot time).
 8. **Handle first-run trust prompt**. Both Claude Code and codex show a trust dialog the first time an agent boots in an unfamiliar directory. Capture the pane and send a single Enter (which selects the highlighted "trust / continue" option) if you see any of:
    - Claude Code: `Is this a project you trust?` / `Yes, I trust this folder`
    - codex: `Do you trust the contents of this directory?` / `Yes, continue`
-   - pi: no equivalent prompt — skip
+   - omp (`pi`): no trust prompt, skip (omp trusts its launch cwd)
 
    After sending Enter, sleep 2s. If no prompt was shown, the directory is already trusted and Enter on an empty input line is harmless.
 9. Send the playbook's `spawn.agents.<agent>.initial` (with param substitution applied) + Enter.
@@ -575,7 +599,7 @@ These dispatch by reading `backend` from `.orca/state.json`. Useful for one-off 
 | Don't | Do |
 |-------|-----|
 | Write project code from orca | Spawn a worker, delegate |
-| Use `claude` instead of `cdp` (or any safe-mode equivalent) | Auto-perms launcher every time |
+| Launch omp/claude in a lowered-approval mode that prompts mid-run | Unattended launcher every time; omp defaults to `yolo`; `cdp` / codex-bypass for the others |
 | Hardcode workflow logic into orca | Put it in a playbook |
 | Hardcode tmux or cmux commands | Use the backend abstraction in `references/backends.md` |
 | Poll faster than 60s in active mode | Sub-60s burns compute for no benefit |

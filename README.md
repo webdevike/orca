@@ -1,8 +1,8 @@
 # 🐋 orca
 
-> Workflow-agnostic multi-pane orchestrator for Claude Code skills. Spawns workers in cmux (or tmux) panes, coordinates them, never writes code itself.
+> Workflow-agnostic multi-pane orchestrator. Spawns workers in cmux (or tmux) panes, coordinates them, never writes code itself. Primary runtime is **omp** (`@oh-my-pi/pi-coding-agent`); Claude Code and codex also supported.
 
-Orca runs as a Claude Code skill (`/orca`). It picks a backend at runtime — cmux if you're inside a cmux workspace, tmux otherwise — and orchestrates worker sessions according to **playbooks** you write. Drop a playbook in `.orca/playbooks/` (project) or `~/.orca/playbooks/` (global) to teach orca a new workflow. A few starters ship in `playbooks/` here.
+Orca runs as a skill invoked with `/orca`, primarily under **omp**, also under Claude Code or codex. It picks a backend at runtime (cmux if you're inside a cmux workspace, tmux otherwise) and orchestrates worker sessions according to **playbooks** you write. Drop a playbook in `.orca/playbooks/` (project) or `~/.orca/playbooks/` (global) to teach orca a new workflow. A few starters ship in `playbooks/` here.
 
 ## Why
 
@@ -18,7 +18,7 @@ cd ~/Code/orca
 ./install.sh
 ```
 
-`install.sh` symlinks this repo to `~/.claude/skills/orca/` (backing up any existing skill at that path to `orca.bak.<timestamp>`). After install, restart Claude Code to pick up the skill, then invoke with `/orca`.
+`install.sh` symlinks this repo to `~/.claude/skills/orca/` (backing up any existing skill to `orca.bak.<timestamp>`). **omp** discovers it there via its `claude` skill provider, no separate install needed; restart omp (or Claude Code) and invoke `/orca`. See [`pi/README.md`](./pi/README.md) for omp specifics.
 
 ## Usage
 
@@ -34,7 +34,7 @@ cd ~/Code/orca
 
 A playbook is a markdown file with YAML frontmatter that tells orca how to drive a particular kind of worker. Bundled examples in [`playbooks/`](./playbooks):
 
-- [`gsd.md`](./playbooks/gsd.md) — GSD multi-repo phase orchestration with auto-advance on `PHASE N COMPLETE ✓`
+- [`gsd.md`](./playbooks/gsd.md): GSD phase orchestration, omp-first, one fresh omp session per phase, advancing to `MILESTONE COMPLETE`
 - _More to come: codex, claude-cdp, dev-server_
 
 Format spec: [`references/playbook-format.md`](./references/playbook-format.md) — full schema, action vocabulary, parameter substitution.

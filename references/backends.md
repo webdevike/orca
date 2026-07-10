@@ -67,10 +67,11 @@ Default to splits up to 4 workers; switch to separate windows when you'd otherwi
 
 ## Auto-permission launchers
 
-Every spawn step launches the worker with its auto-approval flag — orca cannot answer interactive permission prompts in real time without an action handler in the playbook, and even then it's noisy.
+Every spawn step launches the worker in an unattended (non-prompting) mode, so orca cannot answer interactive permission prompts in real time. omp is the exception that needs no flag: its default `approvalMode` is `yolo`. The others take an explicit bypass flag.
 
 | Tool | Auto launcher |
 |------|---------------|
+| omp (`pi`) | `omp`: default `approvalMode: yolo` auto-approves read/write/exec; no flag. Use `--yolo` only if the user's global config lowered the mode. |
 | Claude Code | `cdp` (skip-permissions wrapper) |
 | codex | `codex --dangerously-bypass-approvals-and-sandbox` (or whatever the current full-auto flag is) |
 | Other agentic CLIs | their equivalent unattended flag |
