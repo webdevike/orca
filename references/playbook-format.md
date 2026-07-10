@@ -151,7 +151,7 @@ Missing params with no default → orca prompts user before spawning. Missing re
 
 ## Worked example
 
-See [`playbooks/gsd.md`](../playbooks/gsd.md) for a full real playbook — GSD multi-repo phase orchestration, claude-code-only since `/gsd:*` slash commands are Claude Code skills.
+See [`playbooks/gsd.md`](../playbooks/gsd.md) for a full real playbook. GSD phase orchestration, **omp-first** (`default_agent: pi`, hyphen `/gsd-*` skills, one fresh omp session per phase), with a `claude-code` block as the alternate.
 
 Minimal skeleton for a new playbook:
 
