@@ -7,6 +7,7 @@ Everything orca persists lives under `./.orca/` in the cwd where `/orca` was fir
 ├── state.json           # session state — orchestrator reads/writes every tick
 ├── prd-{name}.md        # per-workstream requirements (orchestrator reads to answer worker questions)
 ├── playbooks/*.md       # project-local playbook overrides (read-only from orca's POV)
+├── signals/{worker_id}.jsonl       # signal channel — worker appends events, orchestrator tails (see below)
 └── logs/{worker_id}-{ISO_ts}.txt   # captured pane tail when escalating
 ```
 
@@ -70,6 +71,10 @@ Single file, JSON, atomic-write (write to `.tmp`, then `mv`). Schema below.
 | `workers[].last_signal` | string | Result of the most recent classify (see Signals below). |
 | `workers[].blocked_by` | array of worker ids | Other workers that must finish before this one's `stop_when` is meaningful. Used for cross-repo phase dependencies. |
 | `workers[].history` | array | Append-only log of significant signal transitions + actions taken. Useful for debugging stuck flows; keep last 50 entries to bound size. |
+| `workers[].signal_file` | absolute path \| null | Set at spawn when the worker runs with the signal channel: `<orca-cwd>/.orca/signals/<id>.jsonl`, exported to the worker as `$ORCA_SIGNAL_FILE`. `null` for screen-scrape-only workers. |
+| `workers[].last_event` | string \| null | Most recent SEMANTIC signal event (heartbeats skipped), from `read-signal.sh`. Drives `events[]` matching. |
+| `workers[].last_event_at` | ISO8601 string \| null | Timestamp of `last_event`. Used to avoid re-firing an `events[]` rule on a stale event. |
+| `workers[].last_heartbeat_at` | ISO8601 string \| null | Timestamp of the most recent event of ANY kind (incl. heartbeat). Liveness anchor; `heartbeat_age_s` past `stuck_threshold_s` → `stuck`. |
 | `questions_pending` | array | Worker questions captured but not yet answered (PRD lookup failed → escalated to user). See below. |
 
 ### Signals (`workers[].last_signal`)
@@ -86,7 +91,27 @@ Generic vocabulary that any playbook's `watch` rules ultimately resolve into:
 | `task_complete` | Playbook's `stop_when` matched. Pane should be closed. |
 | `error` | Output matched an error pattern. Escalate. |
 | `idle` | No output change for `poll_interval_s × 5`. Probably stuck or done waiting; check before assuming dead. |
-| `dead` | Pane unreachable (cmux/tmux returned no surface). Worker is gone — log + remove from active list. |
+| `dead` | Pane unreachable (cmux/tmux returned no surface) OR `session_end` event received without a prior `done`. Worker is gone — log + remove from active list. |
+| `stuck` | Signal-channel only: `heartbeat_age_s` exceeded `stuck_threshold_s` (worker alive at spawn but no events for too long). Escalate. |
+
+### Signal channel (`signals/{worker_id}.jsonl`)
+
+Append-only JSONL, one event per line, written by the worker (`orca-signal` helper + the omp `orca-worker-signal` hook) and tailed by the orchestrator via `scripts/read-signal.sh`. This is the structured replacement for screen-scraping; see `SKILL.md` `## Signal channel`.
+
+Each line:
+
+```json
+{"ts":"2026-07-13T18:30:36Z","worker_id":"gsd-goodword-3","event":"phase_complete","phase":"2"}
+```
+
+| Field | Notes |
+|-------|-------|
+| `ts` | ISO8601 UTC, second precision, trailing `Z`. Matches across the shell helper and the TS hook. |
+| `worker_id` | Echoes `$ORCA_WORKER_ID`; sanity-check against the filename. |
+| `event` | Event name. `heartbeat` (auto, liveness), `idle`/`session_end` (auto, from the hook), or any semantic name the playbook prompt emits (`phase_complete`, `done`, `blocked`, `needs_input`, `error`). |
+| extra fields | Arbitrary `key=value` pairs from the emit call, all stored as strings (`phase`, `reason`, …). Addressable in `events[].next` as `{event.<field>}`. |
+
+`read-signal.sh <worker_id>` returns `last_event` (latest non-heartbeat), `last_event_at`, `last_event_json`, `last_heartbeat_at`, `heartbeat_age_s`, and `event_count`; exit 3 when the file doesn't exist yet (orchestrator falls back to screen-scrape). The channel is append-only and survives `/orca kill` for post-hoc audit alongside `logs/`.
 
 ### `questions_pending` entries
 

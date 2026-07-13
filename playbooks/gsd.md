@@ -26,12 +26,22 @@ spawn:
     pi:
       launcher: omp
       initial_wait_s: 6
-      initial: "/gsd-autonomous --only {phase}"
+      initial: "Run `/gsd-autonomous --only {phase}` to completion. When GSD prints the phase-complete banner, emit from bash: `orca-signal phase_complete phase={phase}`. At MILESTONE COMPLETE emit `orca-signal done`. If GSD stops for a genuine user decision, emit `orca-signal needs_input reason=\"<short>\"` rather than waiting silently."
     # ALT: Claude Code. Colon-form /gsd:* commands, cdp launcher, in-pane /clear advance.
     claude-code:
       launcher: cdp
       initial_wait_s: 8
-      initial: "/clear && /gsd-autonomous --only {phase}"
+      initial: "/clear && then run `/gsd-autonomous --only {phase}` to completion. When GSD prints the phase-complete banner, emit from bash: `orca-signal phase_complete phase={phase}`. At MILESTONE COMPLETE emit `orca-signal done`. If GSD stops for a genuine user decision, emit `orca-signal needs_input reason=\"<short>\"` rather than waiting silently."
+events:
+  # PREFERRED: structured signals emitted by the worker (see initial prompt).
+  - on: done
+    action: stop
+  - on: phase_complete
+    action: stop            # fresh-session-per-phase: close pane; orchestrator spawns the next phase
+  - on: needs_input
+    action: escalate
+  - on: session_end
+    action: stop            # worker session exited (phase finished + pane closed itself)
 watch:
   # terminal
   - pattern: "MILESTONE COMPLETE"
@@ -60,11 +70,16 @@ stop_when:
   - "AUTONOMOUS RUN COMPLETE"
 poll_interval_s: 120
 idle_threshold_s: 1800
+stuck_threshold_s: 1200   # GSD phases run long; only flag stuck after 20min of signal silence
 ---
 
 # Notes for orca (omp is the driver)
 
 I (the orchestrator) run on **omp**, the workers I spawn are also omp. Per orca's core constraint I do NOT do the project coding in my own session; every phase runs in its own worker pane and I only spawn / watch / advance / escalate.
+
+## Signal channel (preferred) + watch fallback
+
+This playbook drives on **structured signals** (`events:`). The worker emits `orca-signal phase_complete phase=N` / `done` / `needs_input` from bash at each milestone (see the `initial` prompt), and the omp `orca-worker-signal` hook adds automatic `heartbeat`/`idle`/`session_end`. orca reads them via `read-signal.sh` — no banner scraping, and `stuck_threshold_s` gives a real watchdog on a phase that goes silent. The `watch:` rules below are the **fallback**: if a worker emits nothing (e.g. GSD didn't run the emit, or a non-signal agent), orca falls back to matching GSD's `PHASE N COMPLETE` / `MILESTONE COMPLETE` banners. Keep both — belt and suspenders during the transition.
 
 ## GSD commands (omp, hyphen-form)
 

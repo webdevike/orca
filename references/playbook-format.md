@@ -27,6 +27,7 @@ category: enum                     # see Categories below; default "implementati
 triggers: [string, ...]            # natural-language phrases that match user intent ("gsd", "run phase")
 poll_interval_s: int               # default 90; how often to capture-pane in active mode
 idle_threshold_s: int              # default 1800; no-output time before signal becomes "idle"
+stuck_threshold_s: int             # default 600; heartbeat_age_s past this → worker flagged stuck (signal channel only)
 chain: [string, ...]               # see Chain below; review-class playbooks to auto-spawn on task_complete
 
 # REQUIRED
@@ -45,13 +46,19 @@ spawn:
       initial: string              # first prompt sent to the agent after launcher boot
   launcher_mode: "auto" | "safe"   # default auto; safe = use non-bypass launcher (rare)
 
-watch:                             # ordered list of pattern-action rules
+events:                            # PREFERRED — structured signal-channel rules (see Events below)
+  - on: string                     # signal event name emitted by the worker (phase_complete, done, ...)
+    where: { key: value, ... }     # optional; all pairs must equal the event's fields (string compare)
+    action: enum                   # same Action vocabulary as watch
+    next: string                   # template; supports {event.<field>} from the matched event
+
+watch:                             # FALLBACK — screen-scrape rules; used only when no signal file exists
   - pattern: regex                 # matched against last 30-50 lines of pane on each poll
     action: enum                   # see Action vocabulary
     next: string                   # template for advance/send_text/clear_and_send actions
 
-stop_when:                         # regex list; first match closes the pane
-  - regex
+stop_when:                         # regex list (screen-scrape); first match closes the pane
+  - regex                          # for the signal channel, use an events rule with action: stop instead
 ---
 
 (Markdown body — natural-language notes for orca, not parsed.)
@@ -90,6 +97,41 @@ Semantics:
 - A playbook that itself declares `category: review` must NOT have a `chain:` field (no chain-of-chains in v1).
 
 Playbooks without `chain:` keep the existing manual-offer behavior. The chain is opt-in per playbook — `gsd.md` (no chain) and `gsd-verify.md` (with chain) coexist as the fast vs thorough modes.
+
+## Events (signal channel)
+
+The **preferred** way to drive a worker. Instead of regex-matching the worker's TUI (`watch:`), the worker declares its state by emitting structured events to `.orca/signals/<worker_id>.jsonl`, and orca matches `events[]` rules against those events. No ANSI parsing, no dependence on a banner string appearing verbatim, and it's event-driven rather than poll-and-guess. See `SKILL.md` `## Signal channel` for the full architecture.
+
+```yaml
+events:
+  - on: phase_complete            # matches an event whose "event" field == "phase_complete"
+    action: advance
+    next: "/gsd-execute-phase {event.phase}"   # {event.<field>} pulls from the matched event
+  - on: blocked
+    action: escalate
+  - on: done
+    action: stop
+```
+
+Semantics:
+- **`on`** (required) — the event name to match (the `event` field of a signal line). Reserved: `heartbeat` (liveness only, never match it) and `session_end` (worker process exited — treat as `dead` unless a `done` already arrived).
+- **`where`** (optional) — a map of field→value; ALL pairs must equal the matched event's fields (string comparison). Use to branch on the same event name, e.g. `on: phase_complete` + `where: {phase: "5"}`.
+- **`action`** — same [Action vocabulary](#action-vocabulary) as `watch`.
+- Rules are evaluated in order; **first match wins per tick**. Put terminal events (`done`, `error`) before broader ones.
+- orca reads the latest *semantic* event (heartbeats skipped) via `scripts/read-signal.sh`. Only events newer than the last one already acted on fire an action — a rule never re-fires on a stale event.
+- **Liveness**: `heartbeat_age_s` (from the same reader) exceeding `stuck_threshold_s` flags the worker `stuck` → `escalate`, independent of `events[]`. This is the watchdog screen-scraping never had.
+
+**Precedence**: if a signal file exists for a worker, orca uses `events[]` and ignores `watch[]`/`stop_when` for it. `watch[]` remains the fallback for workers that emit nothing (older playbooks, agents without the helper). A playbook may declare both: `events[]` for signal-capable runs, `watch[]` as a safety net.
+
+**Emitting events** is the worker's job, wired through the playbook's `initial`/`next` prompts. Tell the worker to call the `orca-signal` helper at each milestone:
+
+```
+When you finish a phase, run exactly:  orca-signal phase_complete phase=<N>
+When the whole task is done, run:       orca-signal done
+If you get blocked, run:                orca-signal blocked reason="<short>"
+```
+
+`orca-signal` is a no-op when `$ORCA_SIGNAL_FILE` is unset, so these instructions are harmless off-orca. omp workers additionally emit automatic `heartbeat`/`idle`/`session_end` events via the `orca-worker-signal` hook (orca loads it with `--hook` at spawn) — no prompt needed for those.
 
 ## Action vocabulary
 
@@ -146,6 +188,7 @@ Lifecycle: see `SKILL.md` `## Delegation`.
 | `{cwd}` | Resolved `spawn.cwd`. |
 | `{ts}` | Current ISO8601 timestamp. |
 | `{<param>}` | Any param from `params:` resolved at invocation. |
+| `{event.<field>}` | In an `events[]` rule's `next:`, the named field of the matched signal event (e.g. `{event.phase}`). Empty string if the field is absent. |
 
 Missing params with no default → orca prompts user before spawning. Missing required params from a non-interactive `/orca <name> key=...` call → error and exit, do not partial-spawn.
 

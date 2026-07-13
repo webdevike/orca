@@ -1,5 +1,28 @@
 # orca — CHANGELOG
 
+## 2026-07-13 — Signal channel (structured worker→orchestrator events)
+
+orca's coordination rode entirely on **screen-scraping**: `poll.sh` captured the worker's TUI and regex-matched it against `watch[]` rules, with completion hinging on the worker printing a banner (`PHASE N COMPLETE ✓`) verbatim. Fragile to ANSI/redraw noise and prompt-phrasing drift, poll-laggy, and with no real liveness check (a hung pane looked identical to a working one). This adds a structured, event-driven channel; screen-scraping remains the fallback.
+
+### Changes
+- **New** `scripts/orca-signal` — worker-side emitter. `orca-signal <event> [k=v …]` appends one JSON line to `$ORCA_SIGNAL_FILE`. No-op when unset, so prompts are safe off-orca.
+- **New** `scripts/read-signal.sh` — orchestrator-side reader. Returns latest *semantic* event (heartbeats skipped), its fields, `heartbeat_age_s`, and `event_count`; exit 3 when no file yet (caller falls back to screen-scrape).
+- **New** `hooks/orca-worker-signal.ts` — omp hook (loaded via `--hook` at spawn) emitting automatic `heartbeat` (turn_end), `idle` (agent_end), `session_end` (shutdown). No-op unless `$ORCA_SIGNAL_FILE` is set.
+- `scripts/poll.sh` — per worker, prefers the signal channel (`read-signal.sh`) and only screen-scrapes workers with no signal file. **Also fixed a pre-existing bug**: the `IFS=$'\t' read` loop collapsed an empty `window` field (the common `window:null` same-window split), shifting `last_signal` into `window` and breaking capture. Now uses a `\x1f` (US) separator.
+- `SKILL.md` — new `## Signal channel` section; Step 4b wires `ORCA_WORKER_ID`/`ORCA_SIGNAL_FILE` env + `--hook` into the launcher and persists `signal_file`; Step 5 gains a signal-channel-first poll path with an `events[]`-matching + `heartbeat_age_s > stuck_threshold_s` watchdog; anti-patterns + helper-script listings updated.
+- `references/playbook-format.md` — new `events:` block (preferred over `watch:`), `stuck_threshold_s`, `{event.<field>}` substitution, `## Events (signal channel)` section.
+- `references/state-schema.md` — `.orca/signals/<worker_id>.jsonl` in the tree; `signal_file`/`last_event`/`last_event_at`/`last_heartbeat_at` worker fields; `stuck` signal; signal-event format.
+- `playbooks/gsd.md` — adopts `events:` (done/phase_complete/needs_input/session_end) + `stuck_threshold_s`, worker prompt emits `orca-signal` at milestones, `watch:` kept as fallback.
+- `install.sh` — symlinks `orca-signal` into `~/.local/bin` and marks scripts executable.
+
+### Verified
+- Standalone: emit→read round-trip (semantic event surfaced over heartbeats), env-unset no-op, missing-file exit 3, poll.sh both branches, fixed field parse.
+- End-to-end: an omp worker launched in an unrelated repo with `--hook` auto-emitted `heartbeat`+`idle`; a worker-invoked `orca-signal phase_complete phase=7` landed; `read-signal.sh` returned it correctly over the heartbeats.
+
+### Worth noting (not coded)
+- Fully backward compatible: playbooks with only `watch:` and workers that emit nothing keep working via the fallback path. The channel is opt-in per playbook.
+- GSD emits semantics via a natural-language `initial` directive (run the command, then `orca-signal`), since GSD's own flow doesn't call orca. If a worker skips the emit, the `watch:` banners still catch completion.
+
 ## 2026-04-29 — Subagent delegation pattern for orchestrator context efficiency
 
 Long orca sessions burn main-thread context on perception (pane polls, log tails, big state reads, multi-kilobyte brief drafts) even though orca itself does coordination, not analysis. Each `cmux read-screen` lands 500–2000 tokens of mostly-noise into orca's window; over 20 ticks × N workers this dominates spend and forces premature session resets.
