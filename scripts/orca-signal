@@ -55,3 +55,22 @@ json="$json}"
 dir="$(dirname "$ORCA_SIGNAL_FILE")"
 mkdir -p "$dir" 2>/dev/null || true
 printf '%s\n' "$json" >> "$ORCA_SIGNAL_FILE"
+
+# Event-driven wake: nudge the orchestrator's pane so it processes this event
+# immediately instead of waiting for its next watchdog tick. Best-effort — a
+# failed send never fails the emit (orca's slow watchdog is the safety net).
+# Requires ORCA_ORCHESTRATOR_SURFACE (the orchestrator's pane ref) + ORCA_BACKEND,
+# both exported by orca at spawn. Semantic events are milestones, so every
+# orca-signal call wakes; heartbeats (hook-only) never do.
+if [ -n "${ORCA_ORCHESTRATOR_SURFACE:-}" ]; then
+  msg="orca-wake: ${ORCA_WORKER_ID:-unknown} $event"
+  case "${ORCA_BACKEND:-cmux}" in
+    cmux)
+      cmux send --surface "$ORCA_ORCHESTRATOR_SURFACE" "$msg" >/dev/null 2>&1 || true
+      cmux send-key --surface "$ORCA_ORCHESTRATOR_SURFACE" enter >/dev/null 2>&1 || true
+      ;;
+    tmux)
+      tmux send-keys -t "$ORCA_ORCHESTRATOR_SURFACE" "$msg" Enter >/dev/null 2>&1 || true
+      ;;
+  esac
+fi

@@ -207,9 +207,11 @@ The default way orca learns a worker's state is **structured events**, not scree
 - **`orca-signal <event> [k=v …]`** (`scripts/orca-signal`) — the worker calls this at semantic milestones, driven by the playbook prompt (`phase_complete`, `done`, `blocked`, …). No-op when `$ORCA_SIGNAL_FILE` is unset, so prompts are safe off-orca.
 - **`orca-worker-signal.ts`** (`hooks/`) — an omp hook orca loads with `--hook` at spawn. Emits automatic `heartbeat` (turn_end), `idle` (agent_end), `session_end` (shutdown). Liveness with zero prompt burden. Claude Code / codex workers get semantics from the helper but no auto-heartbeat.
 
-**Wiring (Step 4b):** orca exports `ORCA_WORKER_ID` + `ORCA_SIGNAL_FILE` into the launcher and appends `--hook` for omp. The file path is absolute and orchestrator-side (`<orca-cwd>/.orca/signals/<id>.jsonl`) because the worker's cwd is its own repo.
+**Wiring (Step 4b):** orca exports `ORCA_WORKER_ID` + `ORCA_SIGNAL_FILE` (where to write) and `ORCA_ORCHESTRATOR_SURFACE` + `ORCA_BACKEND` (how to wake orca) into the launcher, and appends `--hook` for omp. The signal path is absolute and orchestrator-side (`<orca-cwd>/.orca/signals/<id>.jsonl`) because the worker's cwd is its own repo.
 
-**Reading (Step 5):** `scripts/read-signal.sh <worker_id>` returns the latest semantic event, its fields, and `heartbeat_age_s`. orca matches the event against the playbook's `events[]` rules (see [playbook-format.md](./references/playbook-format.md#events-signal-channel)) and runs the same action vocabulary as `watch[]`. `heartbeat_age_s > stuck_threshold_s` trips a **watchdog** — the liveness check screen-scraping never had (a hung-but-present pane looked identical to a working one).
+**Waking (event-driven):** after writing an event, the emitter `cmux send`s an `orca-wake: <worker> <event>` line into orca's pane, so orca acts **immediately** instead of on a timer. `orca-signal` wakes on every (semantic) call; the omp hook wakes on `idle`/`session_end` but not `heartbeat`. This is what makes the channel fast, not just cheap. Omit `ORCA_ORCHESTRATOR_SURFACE` to disable waking (timer-only).
+
+**Reading (Step 5):** `scripts/read-signal.sh <worker_id>` returns the latest semantic event, its fields, and `heartbeat_age_s`. orca matches the event against the playbook's `events[]` rules (see [playbook-format.md](./references/playbook-format.md#events-signal-channel)) and runs the same action vocabulary as `watch[]`. With waking on, the poll timer degrades to a **slow watchdog**: `heartbeat_age_s > stuck_threshold_s` catches a silently wedged worker that emits nothing (and so never wakes orca) — the liveness check screen-scraping never had.
 
 **Playbook authoring:** declare `events[]` for the structured path and keep `watch[]` as a safety net; instruct the worker in `initial`/`next` to emit milestones via `orca-signal`. Full schema + emit conventions in [playbook-format.md](./references/playbook-format.md). Event format + state fields in [state-schema.md](./references/state-schema.md).
 
@@ -274,11 +276,12 @@ For each worker the playbook implies (usually one — but cross-repo playbooks m
    - **cmux**: `cmux new-split <direction>` (default `right`); capture `surface:N` and `workspace:M` from stdout (`OK surface:N workspace:M`). **Note**: `cmux new-split` does NOT honor `spawn.cwd` — the new pane inherits the orchestrator's cwd. If the playbook sets a different `spawn.cwd`, you must `cd` into it as part of the launcher (see step 6).
    - **tmux**: `tmux new-window -d -n "<worker_id>" -c "<spawn.cwd>"`. tmux honors `-c` directly, no extra cd needed.
 5. Sleep `spawn.agents.<agent>.initial_wait_s || 5` seconds.
-6. **Send the launcher**, with cwd compensation for cmux AND signal-channel wiring. The launcher gets two env vars prepended and (for omp workers) the worker-signal hook appended:
-   - Env: `ORCA_WORKER_ID='<worker_id>' ORCA_SIGNAL_FILE='<SIGFILE>'` — exported to the worker so `orca-signal` and the hook know where to write.
-   - omp hook: append `--hook '<orca-repo>/hooks/orca-worker-signal.ts'` to the `omp` launcher for automatic heartbeat/idle/session_end events. (`<orca-repo>` = the orca skill checkout, e.g. `~/.claude/skills/orca`.) Claude Code / codex don't load this hook — they rely on prompt-emitted `orca-signal` calls only.
-   - **cmux + spawn.cwd != orchestrator's cwd**: send `cd '<spawn.cwd>' && ORCA_WORKER_ID='…' ORCA_SIGNAL_FILE='…' <launcher> [--hook …]`.
-   - **cmux + spawn.cwd == orchestrator's cwd**: send `ORCA_WORKER_ID='…' ORCA_SIGNAL_FILE='…' <launcher> [--hook …]` directly.
+6. **Send the launcher**, with cwd compensation for cmux AND signal-channel wiring. The launcher gets four env vars prepended and (for omp workers) the worker-signal hook appended:
+   - `ORCA_WORKER_ID='<worker_id>' ORCA_SIGNAL_FILE='<SIGFILE>'` — so `orca-signal` and the hook know where to write.
+   - `ORCA_ORCHESTRATOR_SURFACE='<orca-pane-ref>' ORCA_BACKEND='<cmux|tmux>'` — so the worker can **wake orca** the instant it emits an event (event-driven, no poll wait). `<orca-pane-ref>` is the orchestrator's OWN pane: `$CMUX_SURFACE_ID` under cmux (captured at Step 1), or orca's tmux pane target. Omit these two to disable wake and fall back to the watchdog tick only.
+   - omp hook: append `--hook '<orca-repo>/hooks/orca-worker-signal.ts'` to the `omp` launcher for automatic heartbeat/idle/session_end events (idle/session_end also wake orca; heartbeat is file-only). (`<orca-repo>` = the orca skill checkout, e.g. `~/.claude/skills/orca`.) Claude Code / codex don't load this hook — they rely on prompt-emitted `orca-signal` calls (which wake orca themselves via the same env).
+   - **cmux + spawn.cwd != orchestrator's cwd**: send `cd '<spawn.cwd>' && ORCA_WORKER_ID='…' ORCA_SIGNAL_FILE='…' ORCA_ORCHESTRATOR_SURFACE='…' ORCA_BACKEND='cmux' <launcher> [--hook …]`.
+   - **cmux + spawn.cwd == orchestrator's cwd**: same env-prefixed `<launcher>` without the `cd`.
    - **tmux**: same env-prefixed launcher (cwd was set at window creation via `-c`).
 
    The launcher must be the unattended variant: `omp` (default `yolo`, no flag), `cdp` for Claude Code, `codex --dangerously-bypass-approvals-and-sandbox` for codex. Submit with `cmux send-key … enter` or `tmux send-keys … Enter`. Also ensure `<orca-repo>/scripts` is on the worker's `PATH` (the playbook prompt calls bare `orca-signal`) — either symlinked into a PATH dir by `install.sh`, or reference it absolutely in the prompt.
@@ -344,9 +347,10 @@ After processing all workers:
 - If any worker had `task_complete` action → proceed to Step 6 for those.
 - If all workers are `task_complete` or `dead` → print summary, exit.
 - If user invoked `/orca status` → print one line per worker (id, signal, last-poll age) and exit.
-- Otherwise → schedule next tick:
-  - In `/loop` mode: `ScheduleWakeup` with delay = playbook's `poll_interval_s` (default 90s active, 1200–1800s if every worker is `idle`).
-  - Outside `/loop`: print "next poll in {N}s" and exit. User re-invokes manually or via cron.
+- Otherwise → schedule the next tick. **When every active worker has a `signal_file`, orca is woken by the workers themselves** (each `orca-signal` / hook `idle`/`session_end` does a `cmux send` into orca's pane — an injected `orca-wake: <worker> <event>` message). So the timer is only a **slow watchdog** to catch silent hangs (a wedged worker emits nothing → no wake):
+  - In `/loop` mode: `ScheduleWakeup` with delay = `stuck_threshold_s` (default 600s) when all active workers are signal-wired; use the shorter `poll_interval_s` (default 90s) only if any active worker is screen-scrape-only (no `signal_file`).
+  - On an `orca-wake:` message arriving, run a tick immediately (don't wait for the timer), then reschedule the watchdog.
+  - Outside `/loop`: print "next watchdog in {N}s" and exit. User re-invokes manually, or a wake message resumes it.
 
 ### Step 6. Close worker(s)
 
@@ -389,9 +393,9 @@ After Phase 1 finishes for every worker in the close queue, do Phase 2 once per 
 
 ## Polling cadence
 
-- Active mode (any worker not `task_complete`/`dead`): **60–120s** between ticks. Default `poll_interval_s: 90`.
-- Idle mode (every worker `idle` for ≥ `idle_threshold_s`): **1200–1800s**. The 5-min cache window matters here — never pick 300–600s, that's worst-of-both.
-- Use `ScheduleWakeup` from `/loop` dynamic mode for self-pacing across context boundaries.
+- **Signal-wired workers (all active have `signal_file`): event-driven.** No fast poll — workers wake orca via `cmux send` on each event. The timer is a slow watchdog at `stuck_threshold_s` (default 600s) purely to catch silent hangs.
+- **Screen-scrape workers (any active lacks `signal_file`):** timer poll. Active mode **60–120s** (`poll_interval_s: 90`); idle mode (every worker `idle` ≥ `idle_threshold_s`) **1200–1800s** — never 300–600s (worst of the 5-min cache window).
+- Use `ScheduleWakeup` from `/loop` dynamic mode for self-pacing across context boundaries; a worker `orca-wake:` message triggers an immediate off-timer tick.
 
 ## State Files
 

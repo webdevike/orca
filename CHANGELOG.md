@@ -2,7 +2,7 @@
 
 ## 2026-07-13 — Signal channel (structured worker→orchestrator events)
 
-orca's coordination rode entirely on **screen-scraping**: `poll.sh` captured the worker's TUI and regex-matched it against `watch[]` rules, with completion hinging on the worker printing a banner (`PHASE N COMPLETE ✓`) verbatim. Fragile to ANSI/redraw noise and prompt-phrasing drift, poll-laggy, and with no real liveness check (a hung pane looked identical to a working one). This adds a structured, event-driven channel; screen-scraping remains the fallback.
+orca's coordination rode entirely on **screen-scraping**: `poll.sh` captured the worker's TUI and regex-matched it against `watch[]` rules, with completion hinging on the worker printing a banner (`PHASE N COMPLETE ✓`) verbatim. Fragile to ANSI/redraw noise and prompt-phrasing drift, poll-laggy, and with no real liveness check (a hung pane looked identical to a working one). This adds a structured, event-driven channel with worker→orchestrator wake; screen-scraping remains the fallback.
 
 ### Changes
 - **New** `scripts/orca-signal` — worker-side emitter. `orca-signal <event> [k=v …]` appends one JSON line to `$ORCA_SIGNAL_FILE`. No-op when unset, so prompts are safe off-orca.
@@ -14,10 +14,12 @@ orca's coordination rode entirely on **screen-scraping**: `poll.sh` captured the
 - `references/state-schema.md` — `.orca/signals/<worker_id>.jsonl` in the tree; `signal_file`/`last_event`/`last_event_at`/`last_heartbeat_at` worker fields; `stuck` signal; signal-event format.
 - `playbooks/gsd.md` — adopts `events:` (done/phase_complete/needs_input/session_end) + `stuck_threshold_s`, worker prompt emits `orca-signal` at milestones, `watch:` kept as fallback.
 - `install.sh` — symlinks `orca-signal` into `~/.local/bin` and marks scripts executable.
+- **Event-driven wake** — emitters `cmux send` an `orca-wake: <worker> <event>` nudge into the orchestrator's pane so orca acts immediately instead of on a timer. `orca-signal` wakes on every semantic call; the omp hook wakes on `idle`/`session_end` (not `heartbeat`). Step 4b exports `ORCA_ORCHESTRATOR_SURFACE` (orca's own `$CMUX_SURFACE_ID`) + `ORCA_BACKEND`; Step 5 + `## Polling cadence` reframed so the fast poll is gone for signal-wired workers — the timer is only a slow watchdog (`stuck_threshold_s`) for silent hangs. Omit `ORCA_ORCHESTRATOR_SURFACE` to disable wake (timer-only).
 
 ### Verified
 - Standalone: emit→read round-trip (semantic event surfaced over heartbeats), env-unset no-op, missing-file exit 3, poll.sh both branches, fixed field parse.
 - End-to-end: an omp worker launched in an unrelated repo with `--hook` auto-emitted `heartbeat`+`idle`; a worker-invoked `orca-signal phase_complete phase=7` landed; `read-signal.sh` returned it correctly over the heartbeats.
+- Wake: `orca-signal` with `ORCA_ORCHESTRATOR_SURFACE` set delivered an `orca-wake: <worker> <event>` line into the target pane via `cmux send` (verified against a stand-in orchestrator pane).
 
 ### Worth noting (not coded)
 - Fully backward compatible: playbooks with only `watch:` and workers that emit nothing keep working via the fallback path. The channel is opt-in per playbook.
