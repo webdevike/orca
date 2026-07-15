@@ -57,6 +57,19 @@ ln -s "$REPO_ROOT" "$TARGET"
 
 echo "✅ Linked $TARGET → $REPO_ROOT"
 echo
+
+# Put the worker-side signal emitter on PATH so playbook prompts can call the
+# bare `orca-signal` command. Mirrors the ~/.local/bin convention used elsewhere.
+chmod +x "$REPO_ROOT/scripts/orca-signal" "$REPO_ROOT/scripts/read-signal.sh" 2>/dev/null || true
+LOCAL_BIN="$HOME/.local/bin"
+mkdir -p "$LOCAL_BIN"
+ln -sf "$REPO_ROOT/scripts/orca-signal" "$LOCAL_BIN/orca-signal"
+echo "🔗 Linked orca-signal → $LOCAL_BIN/orca-signal"
+case ":$PATH:" in
+  *":$LOCAL_BIN:"*) : ;;
+  *) echo "   ⚠  $LOCAL_BIN is not on your PATH — add it, or orca will reference the script absolutely." ;;
+esac
+echo
 echo "Next steps:"
 echo "  1. Restart Claude Code so the skill registry picks up the change."
 echo "  2. Invoke with /orca."

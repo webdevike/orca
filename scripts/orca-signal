@@ -1,0 +1,76 @@
+#!/usr/bin/env sh
+# 🐋 orca/orca-signal — emit a structured event to the orca signal channel.
+#
+# The worker-side half of orca's signal channel. Instead of the orchestrator
+# screen-scraping the worker's TUI to guess its state, the worker declares
+# state explicitly by appending one JSON line per event to a file the
+# orchestrator tails.
+#
+# Usage:
+#   orca-signal <event> [key=value ...]
+#
+# Examples:
+#   orca-signal phase_complete phase=2
+#   orca-signal blocked reason="test endpoint 500s"
+#   orca-signal done
+#
+# Contract:
+#   - Reads the absolute signal-file path from $ORCA_SIGNAL_FILE (set by the
+#     orchestrator at spawn). The worker cannot derive it: .orca/ lives in the
+#     ORCHESTRATOR's cwd, not the worker's repo.
+#   - NO-OP (exit 0) when $ORCA_SIGNAL_FILE is unset, so the same prompt is
+#     safe whether or not the worker runs under orca.
+#   - Values are emitted as JSON strings; the orchestrator reads them with jq.
+#   - Append-only, one line per event. Never truncates.
+#
+# Reserved event name: "heartbeat" is emitted automatically by the omp
+# worker-signal hook for liveness; don't emit it by hand. Use semantic names
+# (phase_complete, done, blocked, needs_input, error, ...).
+
+[ -z "${ORCA_SIGNAL_FILE:-}" ] && exit 0
+
+event="${1:-}"
+if [ -z "$event" ]; then
+  echo "orca-signal: missing event name (usage: orca-signal <event> [k=v ...])" >&2
+  exit 2
+fi
+shift
+
+ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# Minimal JSON string escaping: backslash then double-quote. Input is authored
+# by trusted playbook prompts, so this is sufficient.
+esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+json="{\"ts\":\"$ts\",\"worker_id\":\"$(esc "${ORCA_WORKER_ID:-unknown}")\",\"event\":\"$(esc "$event")\""
+for kv in "$@"; do
+  case "$kv" in
+    *=*) k="${kv%%=*}"; v="${kv#*=}" ;;
+    *)   k="$kv";       v="" ;;
+  esac
+  json="$json,\"$(esc "$k")\":\"$(esc "$v")\""
+done
+json="$json}"
+
+dir="$(dirname "$ORCA_SIGNAL_FILE")"
+mkdir -p "$dir" 2>/dev/null || true
+printf '%s\n' "$json" >> "$ORCA_SIGNAL_FILE"
+
+# Event-driven wake: nudge the orchestrator's pane so it processes this event
+# immediately instead of waiting for its next watchdog tick. Best-effort — a
+# failed send never fails the emit (orca's slow watchdog is the safety net).
+# Requires ORCA_ORCHESTRATOR_SURFACE (the orchestrator's pane ref) + ORCA_BACKEND,
+# both exported by orca at spawn. Semantic events are milestones, so every
+# orca-signal call wakes; heartbeats (hook-only) never do.
+if [ -n "${ORCA_ORCHESTRATOR_SURFACE:-}" ]; then
+  msg="orca-wake: ${ORCA_WORKER_ID:-unknown} $event"
+  case "${ORCA_BACKEND:-cmux}" in
+    cmux)
+      cmux send --surface "$ORCA_ORCHESTRATOR_SURFACE" "$msg" >/dev/null 2>&1 || true
+      cmux send-key --surface "$ORCA_ORCHESTRATOR_SURFACE" enter >/dev/null 2>&1 || true
+      ;;
+    tmux)
+      tmux send-keys -t "$ORCA_ORCHESTRATOR_SURFACE" "$msg" Enter >/dev/null 2>&1 || true
+      ;;
+  esac
+fi
